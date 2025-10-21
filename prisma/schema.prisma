@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Существующие таблицы аутентификации
+model CallcentreAdmin {
+  id        Int      @id @default(autoincrement())
+  login     String   @unique
+  password  String
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("callcentre_admin")
+}
+
+model CallcentreOperator {
+  id         Int      @id @default(autoincrement())
+  name       String
+  login      String   @unique
+  password   String
+  city       String
+  status     String
+  statusWork String   @map("status_work")
+  passport   String?
+  contract   String?
+  dateCreate DateTime @map("date_create")
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  sipAddress String?  @map("sip_address")
+
+  @@map("callcentre_operator")
+}
+
+model Director {
+  id          Int      @id @default(autoincrement())
+  cities      String[] // Массив городов
+  name        String
+  login       String   @unique
+  password    String
+  contractDoc String?  @map("contract_doc")
+  passportDoc String?  @map("passport_doc")
+  dateCreate  DateTime @default(now()) @map("date_create")
+  note        String?
+  tgId        String?  @map("tg_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("director")
+}
+
+model Master {
+  id          Int      @id @default(autoincrement())
+  cities      String[] // Массив городов
+  name        String
+  login       String?  @unique
+  password    String?
+  passportDoc String?  @map("passport_doc")
+  contractDoc String?  @map("contract_doc")
+  statusWork  String   @map("status_work")
+  dateCreate  DateTime @default(now()) @map("date_create")
+  note        String?
+  tgId        String?  @map("tg_id")
+  chatId      String?  @map("chat_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("master")
+}
+
+// Enum для типов пользователей
+enum UserRole {
+  CALLCENTRE_ADMIN
+  CALLCENTRE_OPERATOR
+  DIRECTOR
+  MASTER
+}
+
