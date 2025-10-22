@@ -1,12 +1,5 @@
-import { IsString, IsNotEmpty, IsEnum } from 'class-validator';
+import { IsString, IsNotEmpty, IsIn } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-
-export enum UserRole {
-  CALLCENTRE_ADMIN = 'CALLCENTRE_ADMIN',
-  CALLCENTRE_OPERATOR = 'CALLCENTRE_OPERATOR',
-  DIRECTOR = 'DIRECTOR',
-  MASTER = 'MASTER',
-}
 
 export class LoginDto {
   @ApiProperty({
@@ -27,11 +20,11 @@ export class LoginDto {
 
   @ApiProperty({
     description: 'User role',
-    enum: UserRole,
-    example: UserRole.CALLCENTRE_ADMIN,
+    enum: ['admin', 'operator', 'director', 'master'],
+    example: 'admin',
   })
-  @IsEnum(UserRole)
+  @IsIn(['admin', 'operator', 'director', 'master'])
   @IsNotEmpty()
-  role: UserRole;
+  role: 'admin' | 'operator' | 'director' | 'master';
 }
 

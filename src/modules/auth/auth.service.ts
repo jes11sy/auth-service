@@ -5,12 +5,29 @@ import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoginDto } from './dto/login.dto';
 
-export enum UserRole {
+// Внутренний enum для работы с БД
+enum InternalUserRole {
   CALLCENTRE_ADMIN = 'CALLCENTRE_ADMIN',
   CALLCENTRE_OPERATOR = 'CALLCENTRE_OPERATOR',
   DIRECTOR = 'DIRECTOR',
   MASTER = 'MASTER',
 }
+
+// Маппинг внешних ролей на внутренние
+const roleMap: Record<string, InternalUserRole> = {
+  'admin': InternalUserRole.CALLCENTRE_ADMIN,
+  'operator': InternalUserRole.CALLCENTRE_OPERATOR,
+  'director': InternalUserRole.DIRECTOR,
+  'master': InternalUserRole.MASTER,
+};
+
+// Обратный маппинг для ответов
+const roleReverseMap: Record<InternalUserRole, string> = {
+  [InternalUserRole.CALLCENTRE_ADMIN]: 'admin',
+  [InternalUserRole.CALLCENTRE_OPERATOR]: 'operator',
+  [InternalUserRole.DIRECTOR]: 'director',
+  [InternalUserRole.MASTER]: 'master',
+};
 
 @Injectable()
 export class AuthService {
@@ -22,18 +39,18 @@ export class AuthService {
     private configService: ConfigService,
   ) {}
 
-  async validateUser(login: string, password: string, role: UserRole): Promise<any> {
+  async validateUser(login: string, password: string, role: InternalUserRole): Promise<any> {
     let user: any = null;
 
     try {
       switch (role) {
-        case UserRole.CALLCENTRE_ADMIN:
+        case InternalUserRole.CALLCENTRE_ADMIN:
           user = await this.prisma.callcentreAdmin.findUnique({
             where: { login },
           });
           break;
 
-        case UserRole.CALLCENTRE_OPERATOR:
+        case InternalUserRole.CALLCENTRE_OPERATOR:
           user = await this.prisma.callcentreOperator.findUnique({
             where: { login },
           });
@@ -44,13 +61,13 @@ export class AuthService {
           }
           break;
 
-        case UserRole.DIRECTOR:
+        case InternalUserRole.DIRECTOR:
           user = await this.prisma.director.findUnique({
             where: { login },
           });
           break;
 
-        case UserRole.MASTER:
+        case InternalUserRole.MASTER:
           user = await this.prisma.master.findUnique({
             where: { login },
           });
@@ -92,16 +109,25 @@ export class AuthService {
 
     this.logger.log(`Login attempt: ${login} as ${role}`);
 
-    const user = await this.validateUser(login, password, role);
+    // Преобразуем внешнюю роль во внутренний enum
+    const internalRole = roleMap[role];
+    if (!internalRole) {
+      throw new UnauthorizedException('Invalid role');
+    }
+
+    const user = await this.validateUser(login, password, internalRole);
 
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    // Преобразуем внутреннюю роль обратно во внешний формат
+    const externalRole = roleReverseMap[user.role as InternalUserRole];
+
     const payload = {
       sub: user.id,
       login: user.login,
-      role: user.role,
+      role: externalRole,
       name: user.name,
       cities: user.cities || undefined,
     };
@@ -122,7 +148,7 @@ export class AuthService {
           id: user.id,
           login: user.login,
           name: user.name,
-          role: user.role,
+          role: externalRole,
           cities: user.cities,
           city: user.city, // для оператора
         },
@@ -162,10 +188,16 @@ export class AuthService {
   async getProfile(user: any) {
     const { sub: id, role } = user;
 
+    // Преобразуем внешнюю роль во внутренний enum для запроса к БД
+    const internalRole = roleMap[role];
+    if (!internalRole) {
+      throw new UnauthorizedException('Invalid role');
+    }
+
     let profile: any = null;
 
-    switch (role) {
-      case UserRole.CALLCENTRE_ADMIN:
+    switch (internalRole) {
+      case InternalUserRole.CALLCENTRE_ADMIN:
         profile = await this.prisma.callcentreAdmin.findUnique({
           where: { id },
           select: {
@@ -178,7 +210,7 @@ export class AuthService {
         });
         break;
 
-      case UserRole.CALLCENTRE_OPERATOR:
+      case InternalUserRole.CALLCENTRE_OPERATOR:
         profile = await this.prisma.callcentreOperator.findUnique({
           where: { id },
           select: {
@@ -197,7 +229,7 @@ export class AuthService {
         });
         break;
 
-      case UserRole.DIRECTOR:
+      case InternalUserRole.DIRECTOR:
         profile = await this.prisma.director.findUnique({
           where: { id },
           select: {
@@ -214,7 +246,7 @@ export class AuthService {
         });
         break;
 
-      case UserRole.MASTER:
+      case InternalUserRole.MASTER:
         profile = await this.prisma.master.findUnique({
           where: { id },
           select: {
