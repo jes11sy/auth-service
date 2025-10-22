@@ -3,31 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
-import { LoginDto } from './dto/login.dto';
-
-// Внутренний enum для работы с БД
-enum InternalUserRole {
-  CALLCENTRE_ADMIN = 'CALLCENTRE_ADMIN',
-  CALLCENTRE_OPERATOR = 'CALLCENTRE_OPERATOR',
-  DIRECTOR = 'DIRECTOR',
-  MASTER = 'MASTER',
-}
-
-// Маппинг внешних ролей на внутренние
-const roleMap: Record<string, InternalUserRole> = {
-  'admin': InternalUserRole.CALLCENTRE_ADMIN,
-  'operator': InternalUserRole.CALLCENTRE_OPERATOR,
-  'director': InternalUserRole.DIRECTOR,
-  'master': InternalUserRole.MASTER,
-};
-
-// Обратный маппинг для ответов
-const roleReverseMap: Record<InternalUserRole, string> = {
-  [InternalUserRole.CALLCENTRE_ADMIN]: 'admin',
-  [InternalUserRole.CALLCENTRE_OPERATOR]: 'operator',
-  [InternalUserRole.DIRECTOR]: 'director',
-  [InternalUserRole.MASTER]: 'master',
-};
+import { LoginDto, UserRole } from './dto/login.dto';
 
 @Injectable()
 export class AuthService {
