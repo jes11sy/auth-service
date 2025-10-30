@@ -1,8 +1,9 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger, ForbiddenException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { LoginDto } from './dto/login.dto';
 
 @Injectable()
@@ -13,6 +14,7 @@ export class AuthService {
     private prisma: PrismaService,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private redis: RedisService,
   ) {}
 
   async validateUser(login: string, password: string, role: string): Promise<any> {
@@ -75,7 +77,7 @@ export class AuthService {
       const { password: _, ...result } = user;
       return { ...result, role };
     } catch (error) {
-      this.logger.error(`Validation error for ${login}:`, error.message);
+      this.logger.error(`Validation error:`, error.message);
       throw error;
     }
   }
@@ -83,13 +85,41 @@ export class AuthService {
   async login(loginDto: LoginDto) {
     const { login, password, role } = loginDto;
 
-    this.logger.log(`Login attempt: ${login} as ${role}`);
+    // Проверка brute-force блокировки
+    const lockIdentifier = `${login}:${role}`;
+    const isLocked = await this.redis.isAccountLocked(lockIdentifier, 10);
+
+    if (isLocked) {
+      const ttl = await this.redis.getLockTTL(lockIdentifier);
+      const minutesLeft = Math.ceil(ttl / 60);
+      this.logger.warn(`Account locked: ${role} user (attempts exceeded)`);
+      throw new ForbiddenException(
+        `Too many login attempts. Try again in ${minutesLeft} minute(s).`,
+      );
+    }
 
     const user = await this.validateUser(login, password, role);
 
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      // Записываем неудачную попытку
+      const attempts = await this.redis.recordLoginAttempt(lockIdentifier);
+      const remainingAttempts = 10 - attempts;
+      
+      this.logger.warn(`Failed login attempt for ${role} user (${attempts}/10 attempts)`);
+      
+      if (remainingAttempts > 0) {
+        throw new UnauthorizedException(
+          `Invalid credentials. ${remainingAttempts} attempt(s) remaining.`,
+        );
+      } else {
+        throw new ForbiddenException(
+          'Too many failed login attempts. Account locked for 10 minutes.',
+        );
+      }
     }
+
+    // Успешный вход - сбрасываем счетчик попыток
+    await this.redis.resetLoginAttempts(lockIdentifier);
 
     const payload = {
       sub: user.id,
@@ -105,7 +135,12 @@ export class AuthService {
       expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d'),
     });
 
-    this.logger.log(`Login successful: ${login} (${role})`);
+    // Сохраняем refresh токен в Redis
+    const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d');
+    const refreshTTL = this.parseExpirationToSeconds(refreshExpirationStr);
+    await this.redis.saveRefreshToken(user.id, user.role, refreshToken, refreshTTL);
+
+    this.logger.log(`Login successful for ${role} user`);
 
     return {
       success: true,
@@ -131,6 +166,20 @@ export class AuthService {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
       });
 
+      // Проверяем, существует ли токен в Redis
+      const isValid = await this.redis.isRefreshTokenValid(
+        payload.sub,
+        payload.role,
+        refreshToken,
+      );
+
+      if (!isValid) {
+        throw new UnauthorizedException('Refresh token has been revoked');
+      }
+
+      // Удаляем старый refresh токен (одноразовое использование)
+      await this.redis.revokeRefreshToken(payload.sub, payload.role, refreshToken);
+
       const newPayload = {
         sub: payload.sub,
         login: payload.login,
@@ -139,16 +188,33 @@ export class AuthService {
         cities: payload.cities,
       };
 
+      // Генерируем новую пару токенов
       const newAccessToken = this.jwtService.sign(newPayload);
+      const newRefreshToken = this.jwtService.sign(newPayload, {
+        secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
+        expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d'),
+      });
+
+      // Сохраняем новый refresh токен в Redis
+      const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d');
+      const refreshTTL = this.parseExpirationToSeconds(refreshExpirationStr);
+      await this.redis.saveRefreshToken(payload.sub, payload.role, newRefreshToken, refreshTTL);
+
+      this.logger.log(`Token refreshed for ${payload.role} user`);
 
       return {
         success: true,
         data: {
           accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
         },
       };
     } catch (error) {
-      throw new UnauthorizedException('Invalid refresh token');
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.error('Token refresh error:', error.message);
+      throw new UnauthorizedException('Invalid or expired refresh token');
     }
   }
 
@@ -238,5 +304,40 @@ export class AuthService {
         role,
       },
     };
+  }
+
+  /**
+   * Logout пользователя - отзыв всех refresh токенов
+   */
+  async logout(user: any) {
+    const { sub: userId, role } = user;
+    await this.redis.revokeAllUserTokens(userId, role);
+    this.logger.log(`User logged out: ${role} user`);
+  }
+
+  /**
+   * Парсинг строки времени в секунды (например, '7d' -> 604800)
+   */
+  private parseExpirationToSeconds(expiration: string): number {
+    const match = expiration.match(/^(\d+)([smhd])$/);
+    if (!match) {
+      return 7 * 24 * 60 * 60; // по умолчанию 7 дней
+    }
+
+    const value = parseInt(match[1], 10);
+    const unit = match[2];
+
+    switch (unit) {
+      case 's':
+        return value;
+      case 'm':
+        return value * 60;
+      case 'h':
+        return value * 60 * 60;
+      case 'd':
+        return value * 24 * 60 * 60;
+      default:
+        return 7 * 24 * 60 * 60;
+    }
   }
 }

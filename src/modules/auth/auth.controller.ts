@@ -4,21 +4,51 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RedisService } from '../redis/redis.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly redis: RedisService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   @Get('health')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Health check endpoint' })
   @ApiResponse({ status: 200, description: 'Service is healthy' })
+  @ApiResponse({ status: 503, description: 'Service is unhealthy' })
   async health() {
+    const checks = {
+      database: false,
+      redis: false,
+    };
+
+    try {
+      // Проверка БД
+      await this.prisma.$queryRaw`SELECT 1`;
+      checks.database = true;
+    } catch (error) {
+      // БД недоступна
+    }
+
+    try {
+      // Проверка Redis
+      checks.redis = await this.redis.healthCheck();
+    } catch (error) {
+      // Redis недоступен
+    }
+
+    const isHealthy = checks.database && checks.redis;
+
     return {
-      success: true,
-      message: 'Auth Service is healthy',
+      success: isHealthy,
+      message: isHealthy ? 'Auth Service is healthy' : 'Auth Service is unhealthy',
       timestamp: new Date().toISOString(),
+      checks,
     };
   }
 
@@ -44,9 +74,10 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Logout user' })
+  @ApiOperation({ summary: 'Logout user (revokes all refresh tokens)' })
   @ApiResponse({ status: 200, description: 'Logout successful' })
   async logout(@Request() req) {
+    await this.authService.logout(req.user);
     return {
       success: true,
       message: 'Logout successful',
