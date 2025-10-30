@@ -7,6 +7,9 @@ import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { AuditModule } from '../audit/audit.module';
+import { PrismaModule } from '../prisma/prisma.module';
+import { RedisModule } from '../redis/redis.module';
 
 @Module({
   imports: [
@@ -21,6 +24,9 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
         },
       }),
     }),
+    AuditModule,
+    PrismaModule,
+    RedisModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, LocalStrategy, JwtAuthGuard],

@@ -3,6 +3,14 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module';
+import { PrismaService } from './modules/prisma/prisma.service';
+import { RedisService } from './modules/redis/redis.service';
+import * as os from 'os';
+
+// ✅ ИСПРАВЛЕНИЕ #9: Увеличиваем Thread Pool для bcrypt (async операции)
+// По умолчанию UV_THREADPOOL_SIZE = 4, увеличиваем до CPU count * 2
+const cpuCount = os.cpus().length;
+process.env.UV_THREADPOOL_SIZE = String(Math.max(cpuCount * 2, 8));
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -10,7 +18,7 @@ async function bootstrap() {
     new FastifyAdapter({
       logger: false,
       trustProxy: true,
-      bodyLimit: 10485760, // 10MB
+      bodyLimit: 102400, // ✅ ИСПРАВЛЕНИЕ #11: 100KB вместо 10MB (auth сервис принимает только маленькие JSON)
     }),
   );
 
@@ -92,6 +100,38 @@ async function bootstrap() {
   logger.log(`📚 Swagger docs: http://localhost:${port}/api/docs`);
   logger.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.log(`⚡ Fastify mode enabled`);
+  logger.log(`🧵 Thread pool size: ${process.env.UV_THREADPOOL_SIZE}`);
+
+  // ✅ ИСПРАВЛЕНИЕ #13 (partial): Graceful Shutdown
+  const gracefulShutdown = async (signal: string) => {
+    logger.log(`${signal} received, starting graceful shutdown...`);
+
+    try {
+      // 1. Stop accepting new connections
+      await app.close();
+      logger.log('✅ HTTP server closed');
+
+      // 2. Close database connections
+      const prisma = app.get(PrismaService);
+      await prisma.$disconnect();
+      logger.log('✅ Database disconnected');
+
+      // 3. Close Redis connections
+      const redis = app.get(RedisService);
+      await redis.onModuleDestroy();
+      logger.log('✅ Redis disconnected');
+
+      logger.log('✅ Graceful shutdown complete');
+      process.exit(0);
+    } catch (error) {
+      logger.error('❌ Error during graceful shutdown:', error);
+      process.exit(1);
+    }
+  };
+
+  // Listen for termination signals
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 bootstrap();

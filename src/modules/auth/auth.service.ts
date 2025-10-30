@@ -5,6 +5,17 @@ import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { LoginDto } from './dto/login.dto';
+import { 
+  UserRole, 
+  AuthUser, 
+  JwtPayload, 
+  UserProfile, 
+  LoginResponse, 
+  ProfileResponse,
+  RefreshTokenResponse,
+} from './interfaces/auth.interface';
+import { SecurityConfig, parseExpirationToSeconds, secondsToMinutes } from '../../config/security.config';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class AuthService {
@@ -15,84 +26,116 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
     private redis: RedisService,
+    private auditService: AuditService,
   ) {}
 
-  async validateUser(login: string, password: string, role: string): Promise<any> {
+  /**
+   * Валидация пользователя по логину, паролю и роли
+   * ✅ Защищено от timing attack - bcrypt.compare выполняется всегда
+   * ✅ Защищено от information disclosure - единое сообщение об ошибке
+   */
+  async validateUser(login: string, password: string, role: string): Promise<AuthUser | null> {
     let user: any = null;
+    
+    // ✅ ИСПРАВЛЕНИЕ: Dummy hash для предотвращения timing attack
+    // Если пользователь не найден, всё равно выполним bcrypt.compare с dummy hash
+    // чтобы время ответа было одинаковым (защита от timing attack)
+    const dummyHash = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYzNGJ3zHHO';
 
     try {
-      switch (role) {
-        case 'admin':
+      // Загружаем пользователя в зависимости от роли
+      switch (role as UserRole) {
+        case UserRole.ADMIN:
           user = await this.prisma.callcentreAdmin.findUnique({
             where: { login },
           });
           break;
 
-        case 'operator':
+        case UserRole.OPERATOR:
           user = await this.prisma.callcentreOperator.findUnique({
             where: { login },
           });
-          
-          // Проверка статуса оператора
-          if (user && user.status !== 'active') {
-            throw new UnauthorizedException('Account is not active');
-          }
           break;
 
-        case 'director':
+        case UserRole.DIRECTOR:
           user = await this.prisma.director.findUnique({
             where: { login },
           });
           break;
 
-        case 'master':
+        case UserRole.MASTER:
           user = await this.prisma.master.findUnique({
             where: { login },
           });
-          
-          // Проверка статуса мастера и наличия пароля
-          if (user && !user.password) {
-            throw new UnauthorizedException('Password not set for this master');
-          }
-          if (user && user.statusWork !== 'работает') {
-            throw new UnauthorizedException('Master account is inactive');
-          }
           break;
 
         default:
-          throw new UnauthorizedException('Invalid role');
+          // ✅ ИСПРАВЛЕНИЕ: Не раскрываем что роль невалидна - просто возвращаем null
+          return null;
       }
 
-      if (!user) {
-        return null;
+      // ✅ ИСПРАВЛЕНИЕ: ВСЕГДА выполняем bcrypt.compare для защиты от timing attack
+      // Если user не найден - используем dummy hash
+      const hashToCompare = user?.password || dummyHash;
+      const isPasswordValid = await bcrypt.compare(password, hashToCompare);
+
+      // ✅ ИСПРАВЛЕНИЕ: Единая проверка без раскрытия деталей
+      if (!user || !isPasswordValid) {
+        return null; // Вызовет единое сообщение "Invalid credentials" в login()
       }
 
-      // Проверка пароля
-      const isPasswordValid = await bcrypt.compare(password, user.password);
-      if (!isPasswordValid) {
-        return null;
+      // ✅ ИСПРАВЛЕНИЕ: Проверка дополнительных условий БЕЗ раскрытия информации
+      // Просто возвращаем null - сообщение будет одинаковым для всех случаев
+      if (role === UserRole.OPERATOR && user.status !== 'active') {
+        return null; // Не говорим что аккаунт неактивен
       }
 
-      // Удаляем пароль из результата
-      const { password: _, ...result } = user;
-      return { ...result, role };
+      if (role === UserRole.MASTER) {
+        // Проверяем что пароль задан и мастер работает
+        if (!user.password || user.statusWork !== 'работает') {
+          return null; // Не раскрываем причину
+        }
+      }
+
+      // Успешная валидация - возвращаем типизированного пользователя без пароля
+      const { password: _, ...userData } = user;
+      const authUser: AuthUser = {
+        ...userData,
+        role: role as UserRole,
+      };
+      return authUser;
     } catch (error) {
-      this.logger.error(`Validation error:`, error.message);
-      throw error;
+      // ✅ ИСПРАВЛЕНИЕ: Логируем только общую информацию без деталей
+      this.logger.error(`Validation error for role: ${role}`);
+      return null; // Не пробрасываем исключение наверх
     }
   }
 
-  async login(loginDto: LoginDto) {
+  /**
+   * Вход пользователя в систему
+   * ✅ Использует константы из SecurityConfig
+   * ✅ Логирует все события через AuditService
+   */
+  async login(loginDto: LoginDto, ip: string = '0.0.0.0', userAgent: string = 'Unknown'): Promise<LoginResponse> {
     const { login, password, role } = loginDto;
 
-    // Проверка brute-force блокировки
+    // ✅ ИСПРАВЛЕНИЕ #13: Graceful degradation - если Redis недоступен, продолжаем без brute-force защиты
     const lockIdentifier = `${login}:${role}`;
-    const isLocked = await this.redis.isAccountLocked(lockIdentifier, 10);
+    
+    const isLocked = await this.redis.safeExecute(
+      () => this.redis.isAccountLocked(lockIdentifier, SecurityConfig.MAX_LOGIN_ATTEMPTS),
+      false, // fallback: не блокируем если Redis недоступен
+      'isAccountLocked',
+    );
 
     if (isLocked) {
       const ttl = await this.redis.getLockTTL(lockIdentifier);
-      const minutesLeft = Math.ceil(ttl / 60);
+      const minutesLeft = secondsToMinutes(ttl);
       this.logger.warn(`Account locked: ${role} user (attempts exceeded)`);
+      
+      // ✅ AUDIT: Логируем блокировку аккаунта
+      this.auditService.logLoginBlocked(login, role as UserRole, ip, userAgent, minutesLeft);
+      
       throw new ForbiddenException(
         `Too many login attempts. Try again in ${minutesLeft} minute(s).`,
       );
@@ -101,27 +144,42 @@ export class AuthService {
     const user = await this.validateUser(login, password, role);
 
     if (!user) {
-      // Записываем неудачную попытку
-      const attempts = await this.redis.recordLoginAttempt(lockIdentifier);
-      const remainingAttempts = 10 - attempts;
+      // Записываем неудачную попытку (с graceful degradation)
+      const attempts = await this.redis.safeExecute(
+        () => this.redis.recordLoginAttempt(lockIdentifier),
+        0, // fallback: 0 попыток если Redis недоступен
+        'recordLoginAttempt',
+      );
+      const remainingAttempts = SecurityConfig.MAX_LOGIN_ATTEMPTS - attempts;
       
-      this.logger.warn(`Failed login attempt for ${role} user (${attempts}/10 attempts)`);
+      this.logger.warn(`Failed login attempt for ${role} user (${attempts}/${SecurityConfig.MAX_LOGIN_ATTEMPTS} attempts)`);
       
-      if (remainingAttempts > 0) {
+      // ✅ AUDIT: Логируем неудачную попытку входа
+      this.auditService.logLoginFailed(
+        login, 
+        role as UserRole, 
+        ip, 
+        userAgent, 
+        'Invalid credentials',
+        attempts,
+      );
+      
+      if (remainingAttempts > 0 && attempts > 0) {
         throw new UnauthorizedException(
           `Invalid credentials. ${remainingAttempts} attempt(s) remaining.`,
         );
-      } else {
+      } else if (attempts >= SecurityConfig.MAX_LOGIN_ATTEMPTS) {
         throw new ForbiddenException(
-          'Too many failed login attempts. Account locked for 10 minutes.',
+          `Too many failed login attempts. Account locked for ${SecurityConfig.LOGIN_LOCK_DURATION_SECONDS / SecurityConfig.SECONDS_PER_MINUTE} minutes.`,
         );
+      } else {
+        // Redis недоступен - просто возвращаем базовую ошибку
+        throw new UnauthorizedException('Invalid credentials.');
       }
     }
 
-    // Успешный вход - сбрасываем счетчик попыток
-    await this.redis.resetLoginAttempts(lockIdentifier);
-
-    const payload = {
+    // Формируем JWT payload
+    const payload: JwtPayload = {
       sub: user.id,
       login: user.login,
       role: user.role,
@@ -132,15 +190,29 @@ export class AuthService {
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d'),
+      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL),
     });
 
-    // Сохраняем refresh токен в Redis
-    const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d');
-    const refreshTTL = this.parseExpirationToSeconds(refreshExpirationStr);
-    await this.redis.saveRefreshToken(user.id, user.role, refreshToken, refreshTTL);
+    // ✅ ИСПРАВЛЕНИЕ #12: Redis Pipelining - сохраняем токен И сбрасываем attempts за 1 round trip
+    const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL);
+    const refreshTTL = parseExpirationToSeconds(refreshExpirationStr);
+    
+    await this.redis.safeExecute(
+      () => this.redis.saveRefreshTokenAndResetAttempts(
+        user.id,
+        user.role,
+        refreshToken,
+        refreshTTL,
+        lockIdentifier,
+      ),
+      undefined,
+      'saveRefreshTokenAndResetAttempts',
+    );
 
     this.logger.log(`Login successful for ${role} user`);
+    
+    // ✅ AUDIT: Логируем успешный вход
+    this.auditService.logLoginSuccess(user.id, user.role, user.login, ip, userAgent);
 
     return {
       success: true,
@@ -160,11 +232,21 @@ export class AuthService {
     };
   }
 
-  async refreshToken(refreshToken: string) {
+  /**
+   * Обновление access токена по refresh токену
+   * ✅ Детектирует token reuse attack
+   * ✅ Использует константы из SecurityConfig
+   * ✅ Логирует все события через AuditService
+   */
+  async refreshToken(
+    refreshToken: string, 
+    ip: string = '0.0.0.0', 
+    userAgent: string = 'Unknown'
+  ): Promise<RefreshTokenResponse> {
     try {
       const payload = this.jwtService.verify(refreshToken, {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      });
+      }) as JwtPayload;
 
       // Проверяем, существует ли токен в Redis
       const isValid = await this.redis.isRefreshTokenValid(
@@ -174,13 +256,43 @@ export class AuthService {
       );
 
       if (!isValid) {
+        // 🚨 Проверяем: была ли попытка повторного использования отозванного токена
+        const wasRecentlyRevoked = await this.redis.wasTokenRecentlyRevoked(
+          payload.sub,
+          payload.role,
+          refreshToken,
+        );
+
+        if (wasRecentlyRevoked) {
+          // SECURITY ALERT: Token reuse detected! Возможная кража токена
+          this.logger.error(
+            `🚨 SECURITY ALERT: Refresh token reuse detected for user ${payload.sub} (${payload.role}). Revoking all user tokens!`,
+          );
+          
+          // ✅ AUDIT: Логируем критическое событие безопасности
+          this.auditService.logTokenReuse(payload.sub, payload.role, ip, userAgent);
+
+          // Отзываем ВСЕ токены пользователя для безопасности
+          await this.redis.revokeAllUserTokens(payload.sub, payload.role);
+
+          throw new UnauthorizedException(
+            'Security violation detected. All sessions have been terminated. Please login again.',
+          );
+        }
+
         throw new UnauthorizedException('Refresh token has been revoked');
       }
 
-      // Удаляем старый refresh токен (одноразовое использование)
-      await this.redis.revokeRefreshToken(payload.sub, payload.role, refreshToken);
+      // Удаляем старый refresh токен с отслеживанием (для детекции повторного использования)
+      // Храним информацию об отозванном токене для детекции token reuse attack
+      await this.redis.revokeRefreshTokenWithTracking(
+        payload.sub,
+        payload.role,
+        refreshToken,
+        SecurityConfig.REVOKED_TOKEN_TRACKING_TTL,
+      );
 
-      const newPayload = {
+      const newPayload: JwtPayload = {
         sub: payload.sub,
         login: payload.login,
         role: payload.role,
@@ -192,15 +304,18 @@ export class AuthService {
       const newAccessToken = this.jwtService.sign(newPayload);
       const newRefreshToken = this.jwtService.sign(newPayload, {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-        expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d'),
+        expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL),
       });
 
       // Сохраняем новый refresh токен в Redis
-      const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', '7d');
-      const refreshTTL = this.parseExpirationToSeconds(refreshExpirationStr);
+      const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL);
+      const refreshTTL = parseExpirationToSeconds(refreshExpirationStr);
       await this.redis.saveRefreshToken(payload.sub, payload.role, newRefreshToken, refreshTTL);
 
       this.logger.log(`Token refreshed for ${payload.role} user`);
+      
+      // ✅ AUDIT: Логируем обновление токена
+      this.auditService.logTokenRefresh(payload.sub, payload.role, ip, userAgent);
 
       return {
         success: true,
@@ -218,13 +333,50 @@ export class AuthService {
     }
   }
 
-  async getProfile(user: any) {
+  /**
+   * Получение профиля пользователя
+   * ✅ Использует кеширование с константами из SecurityConfig
+   * ✅ Строгая типизация
+   * ✅ Логирует обращение к профилю
+   */
+  async getProfile(
+    user: JwtPayload, 
+    ip: string = '0.0.0.0', 
+    userAgent: string = 'Unknown'
+  ): Promise<ProfileResponse> {
     const { sub: id, role } = user;
 
+    // ✅ ИСПРАВЛЕНИЕ #8: Кеширование профилей в Redis с константой TTL
+    const cacheKey = `profile:${role}:${id}`;
+
+    // Пробуем получить из кеша
+    const cached = await this.redis.safeExecute(
+      async () => {
+        const value = await this.redis.get(cacheKey);
+        return value ? JSON.parse(value) : null;
+      },
+      null,
+      'getProfileFromCache',
+    );
+
+    if (cached) {
+      this.logger.debug(`Profile cache HIT for user ${id} (${role})`);
+      
+      // ✅ AUDIT: Логируем доступ к профилю (cache hit)
+      this.auditService.logProfileAccess(id, role, ip, userAgent, true);
+      
+      return {
+        success: true,
+        data: cached as UserProfile,
+      };
+    }
+
+    // Кеш промах - загружаем из БД
+    this.logger.debug(`Profile cache MISS for user ${id} (${role})`);
     let profile: any = null;
 
     switch (role) {
-      case 'admin':
+      case UserRole.ADMIN:
         profile = await this.prisma.callcentreAdmin.findUnique({
           where: { id },
           select: {
@@ -237,7 +389,7 @@ export class AuthService {
         });
         break;
 
-      case 'operator':
+      case UserRole.OPERATOR:
         profile = await this.prisma.callcentreOperator.findUnique({
           where: { id },
           select: {
@@ -256,7 +408,7 @@ export class AuthService {
         });
         break;
 
-      case 'director':
+      case UserRole.DIRECTOR:
         profile = await this.prisma.director.findUnique({
           where: { id },
           select: {
@@ -273,7 +425,7 @@ export class AuthService {
         });
         break;
 
-      case 'master':
+      case UserRole.MASTER:
         profile = await this.prisma.master.findUnique({
           where: { id },
           select: {
@@ -297,47 +449,38 @@ export class AuthService {
       throw new UnauthorizedException('User profile not found');
     }
 
+    const result: UserProfile = { ...profile, role };
+
+    // Сохраняем в кеш (с graceful degradation)
+    await this.redis.safeExecute(
+      () => this.redis.set(cacheKey, JSON.stringify(result), SecurityConfig.PROFILE_CACHE_TTL),
+      undefined,
+      'saveProfileToCache',
+    );
+    
+    // ✅ AUDIT: Логируем доступ к профилю (cache miss)
+    this.auditService.logProfileAccess(id, role, ip, userAgent, false);
+
     return {
       success: true,
-      data: {
-        ...profile,
-        role,
-      },
+      data: result,
     };
   }
 
   /**
    * Logout пользователя - отзыв всех refresh токенов
+   * ✅ Логирует событие выхода
    */
-  async logout(user: any) {
+  async logout(
+    user: JwtPayload, 
+    ip: string = '0.0.0.0', 
+    userAgent: string = 'Unknown'
+  ): Promise<void> {
     const { sub: userId, role } = user;
     await this.redis.revokeAllUserTokens(userId, role);
     this.logger.log(`User logged out: ${role} user`);
-  }
-
-  /**
-   * Парсинг строки времени в секунды (например, '7d' -> 604800)
-   */
-  private parseExpirationToSeconds(expiration: string): number {
-    const match = expiration.match(/^(\d+)([smhd])$/);
-    if (!match) {
-      return 7 * 24 * 60 * 60; // по умолчанию 7 дней
-    }
-
-    const value = parseInt(match[1], 10);
-    const unit = match[2];
-
-    switch (unit) {
-      case 's':
-        return value;
-      case 'm':
-        return value * 60;
-      case 'h':
-        return value * 60 * 60;
-      case 'd':
-        return value * 24 * 60 * 60;
-      default:
-        return 7 * 24 * 60 * 60;
-    }
+    
+    // ✅ AUDIT: Логируем выход из системы
+    this.auditService.logLogout(userId, role, ip, userAgent);
   }
 }

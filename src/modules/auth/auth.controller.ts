@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, UseGuards, Request, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Body, Get, UseGuards, Request, HttpCode, HttpStatus, Ip, Headers } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -15,6 +15,13 @@ export class AuthController {
     private readonly redis: RedisService,
     private readonly prisma: PrismaService,
   ) {}
+
+  /**
+   * Вспомогательный метод для извлечения User-Agent из заголовков
+   */
+  private getUserAgent(headers: any): string {
+    return headers['user-agent'] || 'Unknown';
+  }
 
   @Get('health')
   @HttpCode(HttpStatus.OK)
@@ -57,8 +64,13 @@ export class AuthController {
   @ApiOperation({ summary: 'Login user by role' })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
-  async login(@Body() loginDto: LoginDto) {
-    return this.authService.login(loginDto);
+  async login(
+    @Body() loginDto: LoginDto,
+    @Ip() ip: string,
+    @Headers() headers: any,
+  ) {
+    const userAgent = this.getUserAgent(headers);
+    return this.authService.login(loginDto, ip, userAgent);
   }
 
   @Post('refresh')
@@ -66,8 +78,13 @@ export class AuthController {
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'Token refreshed' })
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
-  async refresh(@Body() refreshTokenDto: RefreshTokenDto) {
-    return this.authService.refreshToken(refreshTokenDto.refreshToken);
+  async refresh(
+    @Body() refreshTokenDto: RefreshTokenDto,
+    @Ip() ip: string,
+    @Headers() headers: any,
+  ) {
+    const userAgent = this.getUserAgent(headers);
+    return this.authService.refreshToken(refreshTokenDto.refreshToken, ip, userAgent);
   }
 
   @Post('logout')
@@ -76,8 +93,13 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Logout user (revokes all refresh tokens)' })
   @ApiResponse({ status: 200, description: 'Logout successful' })
-  async logout(@Request() req) {
-    await this.authService.logout(req.user);
+  async logout(
+    @Request() req,
+    @Ip() ip: string,
+    @Headers() headers: any,
+  ) {
+    const userAgent = this.getUserAgent(headers);
+    await this.authService.logout(req.user, ip, userAgent);
     return {
       success: true,
       message: 'Logout successful',
@@ -102,8 +124,13 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get user profile' })
   @ApiResponse({ status: 200, description: 'Profile retrieved' })
-  async getProfile(@Request() req) {
-    return this.authService.getProfile(req.user);
+  async getProfile(
+    @Request() req,
+    @Ip() ip: string,
+    @Headers() headers: any,
+  ) {
+    const userAgent = this.getUserAgent(headers);
+    return this.authService.getProfile(req.user, ip, userAgent);
   }
 }
 
