@@ -35,6 +35,11 @@ model CallcentreOperator {
   updatedAt  DateTime @updatedAt @map("updated_at")
   sipAddress String?  @map("sip_address")
 
+  // ✅ ИСПРАВЛЕНИЕ PERF-002: Performance Indexes
+  @@index([status])              // Для быстрой фильтрации по статусу
+  @@index([status, login])       // Составной индекс для login query с проверкой статуса
+  @@index([city])                // Для фильтрации по городу
+  @@index([statusWork])          // Для фильтрации по статусу работы
   @@map("callcentre_operator")
 }
 
@@ -71,6 +76,9 @@ model Master {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
+  // ✅ ИСПРАВЛЕНИЕ PERF-002: Performance Indexes
+  @@index([statusWork])          // Для проверки статуса работы при login
+  @@index([statusWork, login])   // Составной индекс для login query с проверкой statusWork
   @@map("master")
 }
 

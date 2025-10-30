@@ -12,7 +12,54 @@ import * as os from 'os';
 const cpuCount = os.cpus().length;
 process.env.UV_THREADPOOL_SIZE = String(Math.max(cpuCount * 2, 8));
 
+/**
+ * ✅ ИСПРАВЛЕНИЕ VULN-004: Валидация JWT секретов
+ * Проверяем что JWT_SECRET и JWT_REFRESH_SECRET:
+ * 1. Существуют
+ * 2. Не пустые
+ * 3. Различаются между собой
+ */
+function validateJwtSecrets(): void {
+  const jwtSecret = process.env.JWT_SECRET;
+  const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET;
+  const logger = new Logger('SecurityValidation');
+
+  // Проверка наличия секретов
+  if (!jwtSecret || jwtSecret.trim().length === 0) {
+    logger.error('❌ JWT_SECRET is required but not set in environment variables');
+    throw new Error('SECURITY ERROR: JWT_SECRET must be configured');
+  }
+
+  if (!jwtRefreshSecret || jwtRefreshSecret.trim().length === 0) {
+    logger.error('❌ JWT_REFRESH_SECRET is required but not set in environment variables');
+    throw new Error('SECURITY ERROR: JWT_REFRESH_SECRET must be configured');
+  }
+
+  // ✅ КРИТИЧЕСКАЯ ПРОВЕРКА: Секреты должны быть разными
+  if (jwtSecret === jwtRefreshSecret) {
+    logger.error('❌ SECURITY VULNERABILITY: JWT_SECRET and JWT_REFRESH_SECRET are identical!');
+    logger.error('   This allows attackers to forge refresh tokens from access tokens.');
+    logger.error('   Please set different values for JWT_SECRET and JWT_REFRESH_SECRET.');
+    throw new Error('SECURITY ERROR: JWT_SECRET and JWT_REFRESH_SECRET must be different');
+  }
+
+  // Дополнительные проверки безопасности
+  const minSecretLength = 32;
+  if (jwtSecret.length < minSecretLength) {
+    logger.warn(`⚠️  JWT_SECRET is too short (${jwtSecret.length} chars). Recommended: ${minSecretLength}+ chars`);
+  }
+
+  if (jwtRefreshSecret.length < minSecretLength) {
+    logger.warn(`⚠️  JWT_REFRESH_SECRET is too short (${jwtRefreshSecret.length} chars). Recommended: ${minSecretLength}+ chars`);
+  }
+
+  logger.log('✅ JWT secrets validation passed');
+}
+
 async function bootstrap() {
+  // ✅ Валидация секретов ПЕРЕД запуском приложения
+  validateJwtSecrets();
+
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({
