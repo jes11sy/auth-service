@@ -20,6 +20,7 @@ import { AuditService } from '../audit/audit.service';
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+  private dummyHash: string;
 
   constructor(
     private prisma: PrismaService,
@@ -27,7 +28,28 @@ export class AuthService {
     private configService: ConfigService,
     private redis: RedisService,
     private auditService: AuditService,
-  ) {}
+  ) {
+    // ✅ ИСПРАВЛЕНИЕ: Генерируем dummy hash при старте сервиса
+    // Используется для защиты от timing attack
+    this.initializeDummyHash();
+  }
+
+  /**
+   * Генерация dummy hash для защиты от timing attack
+   * Выполняется один раз при инициализации сервиса
+   */
+  private async initializeDummyHash(): Promise<void> {
+    try {
+      // Генерируем случайный dummy hash с уникальным seed
+      const randomSeed = `dummy_${Date.now()}_${Math.random()}`;
+      this.dummyHash = await bcrypt.hash(randomSeed, SecurityConfig.BCRYPT_ROUNDS);
+      this.logger.log('✅ Dummy hash initialized for timing attack protection');
+    } catch (error) {
+      // Fallback на статичный hash если генерация не удалась
+      this.dummyHash = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYzNGJ3zHHO';
+      this.logger.warn('⚠️ Using fallback dummy hash due to initialization error');
+    }
+  }
 
   /**
    * Валидация пользователя по логину, паролю и роли
@@ -36,11 +58,6 @@ export class AuthService {
    */
   async validateUser(login: string, password: string, role: string): Promise<AuthUser | null> {
     let user: any = null;
-    
-    // ✅ ИСПРАВЛЕНИЕ: Dummy hash для предотвращения timing attack
-    // Если пользователь не найден, всё равно выполним bcrypt.compare с dummy hash
-    // чтобы время ответа было одинаковым (защита от timing attack)
-    const dummyHash = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYzNGJ3zHHO';
 
     try {
       // Загружаем пользователя в зависимости от роли
@@ -75,8 +92,8 @@ export class AuthService {
       }
 
       // ✅ ИСПРАВЛЕНИЕ: ВСЕГДА выполняем bcrypt.compare для защиты от timing attack
-      // Если user не найден - используем dummy hash
-      const hashToCompare = user?.password || dummyHash;
+      // Если user не найден - используем динамически сгенерированный dummy hash
+      const hashToCompare = user?.password || this.dummyHash;
       const isPasswordValid = await bcrypt.compare(password, hashToCompare);
 
       // ✅ ИСПРАВЛЕНИЕ: Единая проверка без раскрытия деталей

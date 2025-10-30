@@ -102,9 +102,32 @@ async function bootstrap() {
     crossOriginEmbedderPolicy: false,
   });
 
-  // Compression
+  // ✅ ИСПРАВЛЕНИЕ: Настройка Response Compression с оптимальными параметрами
   await app.register(require('@fastify/compress'), {
+    global: true,
     encodings: ['gzip', 'deflate', 'br'],
+    threshold: 1024, // Сжимать только ответы больше 1KB
+    
+    // Brotli настройки (лучшее сжатие для современных браузеров)
+    brotliOptions: {
+      params: {
+        // Режим оптимизирован для текста/JSON
+        [require('zlib').constants.BROTLI_PARAM_MODE]: require('zlib').constants.BROTLI_MODE_TEXT,
+        // Quality 4 = баланс между скоростью и степенью сжатия
+        [require('zlib').constants.BROTLI_PARAM_QUALITY]: 4,
+      },
+    },
+    
+    // Gzip/Deflate настройки
+    zlibOptions: {
+      level: 6, // Уровень 6 = хороший баланс скорость/размер
+    },
+    
+    // Не сжимаем уже сжатые форматы
+    customTypes: /^text\/|application\/json|application\/javascript/,
+    
+    // Удаляем Content-Length при сжатии (будет пересчитан)
+    removeContentLengthHeader: true,
   });
 
   // Rate limiting

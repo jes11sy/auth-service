@@ -46,7 +46,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   // ==================== REFRESH TOKENS ====================
 
   /**
-   * Сохранить refresh токен в Redis
+   * ✅ ОПТИМИЗИРОВАНО: Сохранить refresh токен в Redis с SET для быстрого удаления всех токенов
    * @param userId ID пользователя
    * @param role Роль пользователя
    * @param token Refresh токен
@@ -58,9 +58,24 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     token: string,
     ttlSeconds: number = 7 * 24 * 60 * 60,
   ): Promise<void> {
-    const key = `refresh_token:${role}:${userId}:${token}`;
-    await this.client.setex(key, ttlSeconds, '1');
-    this.logger.debug(`Refresh token saved for user ${userId} (${role})`);
+    const tokenKey = `refresh_token:${role}:${userId}:${token}`;
+    const userTokensSet = `user_tokens:${role}:${userId}`;
+    
+    // Используем pipeline для атомарности и производительности
+    const pipeline = this.client.pipeline();
+    
+    // 1. Сохраняем сам токен с TTL
+    pipeline.setex(tokenKey, ttlSeconds, '1');
+    
+    // 2. Добавляем токен в SET для быстрого поиска всех токенов юзера
+    pipeline.sadd(userTokensSet, token);
+    
+    // 3. Обновляем TTL на SET (продлеваем при каждом новом токене)
+    pipeline.expire(userTokensSet, ttlSeconds);
+    
+    await pipeline.exec();
+    
+    this.logger.debug(`Refresh token saved for user ${userId} (${role}) with SET indexing`);
   }
 
   /**
@@ -73,31 +88,83 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Удалить refresh токен (при logout или refresh)
+   * ✅ ОПТИМИЗИРОВАНО: Удалить refresh токен (при logout или refresh)
    */
   async revokeRefreshToken(userId: number, role: string, token: string): Promise<void> {
-    const key = `refresh_token:${role}:${userId}:${token}`;
-    await this.client.del(key);
+    const tokenKey = `refresh_token:${role}:${userId}:${token}`;
+    const userTokensSet = `user_tokens:${role}:${userId}`;
+    
+    // Используем pipeline для атомарности
+    const pipeline = this.client.pipeline();
+    pipeline.del(tokenKey);
+    pipeline.srem(userTokensSet, token); // Удаляем из SET
+    
+    await pipeline.exec();
+    
     this.logger.debug(`Refresh token revoked for user ${userId} (${role})`);
   }
 
   /**
-   * Удалить все refresh токены пользователя
-   * ✅ ИСПРАВЛЕНО: Использует SCAN вместо блокирующего KEYS
+   * ✅ ОПТИМИЗИРОВАНО: Удалить все refresh токены пользователя за O(N) вместо O(N*M)
+   * Использует Redis SET для мгновенного получения списка всех токенов юзера
    */
   async revokeAllUserTokens(userId: number, role: string): Promise<void> {
+    const userTokensSet = `user_tokens:${role}:${userId}`;
+    
+    try {
+      // Получаем все токены пользователя из SET за O(1) операцию
+      const tokens = await this.client.smembers(userTokensSet);
+      
+      if (tokens.length === 0) {
+        this.logger.debug(`No tokens found for user ${userId} (${role})`);
+        return;
+      }
+      
+      // Удаляем все токены одним pipeline запросом
+      const pipeline = this.client.pipeline();
+      
+      // Удаляем каждый токен
+      tokens.forEach(token => {
+        const tokenKey = `refresh_token:${role}:${userId}:${token}`;
+        pipeline.del(tokenKey);
+      });
+      
+      // Удаляем сам SET
+      pipeline.del(userTokensSet);
+      
+      // Выполняем все операции атомарно
+      await pipeline.exec();
+      
+      this.logger.debug(
+        `✅ All tokens revoked for user ${userId} (${role}): ${tokens.length} tokens deleted via SET optimization`,
+      );
+    } catch (error) {
+      // Fallback на старый метод через SCAN если что-то пошло не так
+      this.logger.warn(
+        `⚠️ SET-based revocation failed, falling back to SCAN method for user ${userId} (${role})`,
+      );
+      
+      await this.revokeAllUserTokensViaScan(userId, role);
+    }
+  }
+
+  /**
+   * Fallback метод: удаление токенов через SCAN (используется если SET метод не сработал)
+   * @private
+   */
+  private async revokeAllUserTokensViaScan(userId: number, role: string): Promise<void> {
     const pattern = `refresh_token:${role}:${userId}:*`;
     const keysToDelete: string[] = [];
     let cursor = '0';
 
-    // Используем SCAN для итеративного поиска ключей (не блокирует Redis)
+    // Используем SCAN для итеративного поиска ключей
     do {
       const result = await this.client.scan(
         cursor,
         'MATCH',
         pattern,
         'COUNT',
-        100, // Сканируем по 100 ключей за раз
+        100,
       );
       
       cursor = result[0];
@@ -108,7 +175,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       }
     } while (cursor !== '0');
 
-    // Удаляем найденные ключи батчами по 100 штук
+    // Удаляем найденные ключи батчами
     if (keysToDelete.length > 0) {
       const batchSize = 100;
       for (let i = 0; i < keysToDelete.length; i += batchSize) {
@@ -116,15 +183,13 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         await this.client.del(...batch);
       }
       this.logger.debug(
-        `All tokens revoked for user ${userId} (${role}): ${keysToDelete.length} tokens deleted`,
+        `All tokens revoked via SCAN for user ${userId} (${role}): ${keysToDelete.length} tokens deleted`,
       );
-    } else {
-      this.logger.debug(`No tokens found for user ${userId} (${role})`);
     }
   }
 
   /**
-   * Удалить refresh токен с отслеживанием для детекции повторного использования
+   * ✅ ОПТИМИЗИРОВАНО: Удалить refresh токен с отслеживанием для детекции повторного использования
    * @param userId ID пользователя
    * @param role Роль пользователя
    * @param token Refresh токен
@@ -137,11 +202,13 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     trackingTTL: number = 3600,
   ): Promise<void> {
     const tokenKey = `refresh_token:${role}:${userId}:${token}`;
+    const userTokensSet = `user_tokens:${role}:${userId}`;
     const trackingKey = `revoked_token:${role}:${userId}:${token}`;
 
     // Используем pipeline для атомарности
     const pipeline = this.client.pipeline();
     pipeline.del(tokenKey);
+    pipeline.srem(userTokensSet, token); // Удаляем из SET
     pipeline.setex(trackingKey, trackingTTL, '1');
     
     await pipeline.exec();
@@ -268,8 +335,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   // ==================== REDIS PIPELINING ====================
 
   /**
-   * ✅ ИСПРАВЛЕНИЕ #12: Сохранить refresh токен И сбросить счетчик попыток (pipeline)
-   * Выполняет 2 операции за 1 round trip
+   * ✅ ОПТИМИЗИРОВАНО: Сохранить refresh токен И сбросить счетчик попыток (pipeline)
+   * Теперь также добавляет токен в SET для быстрого удаления
    */
   async saveRefreshTokenAndResetAttempts(
     userId: number,
@@ -279,16 +346,27 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     lockIdentifier: string,
   ): Promise<void> {
     const tokenKey = `refresh_token:${role}:${userId}:${token}`;
+    const userTokensSet = `user_tokens:${role}:${userId}`;
     const attemptsKey = `login_attempts:${lockIdentifier}`;
 
     const pipeline = this.client.pipeline();
+    
+    // 1. Сохраняем токен
     pipeline.setex(tokenKey, ttlSeconds, '1');
+    
+    // 2. Добавляем в SET
+    pipeline.sadd(userTokensSet, token);
+    
+    // 3. Обновляем TTL на SET
+    pipeline.expire(userTokensSet, ttlSeconds);
+    
+    // 4. Сбрасываем попытки входа
     pipeline.del(attemptsKey);
     
     await pipeline.exec();
     
     this.logger.debug(
-      `Refresh token saved and login attempts reset for user ${userId} (${role}) via pipeline`,
+      `Refresh token saved with SET, login attempts reset for user ${userId} (${role}) via optimized pipeline`,
     );
   }
 

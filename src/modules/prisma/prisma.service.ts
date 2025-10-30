@@ -47,10 +47,69 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     try {
       await this.$connect();
       this.logger.log('✅ Database connected successfully');
+      
+      // ✅ ИСПРАВЛЕНИЕ: Добавляем middleware для мониторинга производительности запросов
+      this.setupQueryPerformanceMonitoring();
     } catch (error) {
       this.logger.error('❌ Failed to connect to database', error);
       throw error;
     }
+  }
+
+  /**
+   * ✅ НОВОЕ: Query Performance Monitoring
+   * Отслеживает медленные запросы и логирует их для оптимизации
+   */
+  private setupQueryPerformanceMonitoring(): void {
+    this.$use(async (params, next) => {
+      const startTime = Date.now();
+      
+      try {
+        const result = await next(params);
+        const duration = Date.now() - startTime;
+        
+        // Пороги для разных типов операций
+        const SLOW_QUERY_THRESHOLD = 1000; // 1 секунда
+        const WARNING_THRESHOLD = 500;     // 500 мс
+        
+        // Детальное логирование медленных запросов
+        if (duration > SLOW_QUERY_THRESHOLD) {
+          this.logger.error(
+            `🐌 SLOW QUERY DETECTED: ${params.model}.${params.action} took ${duration}ms`,
+            JSON.stringify({
+              model: params.model,
+              action: params.action,
+              duration,
+              args: params.args,
+              timestamp: new Date().toISOString(),
+            }, null, 2)
+          );
+        } else if (duration > WARNING_THRESHOLD) {
+          this.logger.warn(
+            `⚠️ Slow query: ${params.model}.${params.action} took ${duration}ms`
+          );
+        } else if (process.env.NODE_ENV === 'development') {
+          // В dev режиме логируем все запросы для анализа
+          this.logger.debug(
+            `Query: ${params.model}.${params.action} - ${duration}ms`
+          );
+        }
+        
+        // TODO: Интеграция с Prometheus для метрик
+        // prometheusService.recordQueryDuration(params.model, params.action, duration);
+        
+        return result;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        this.logger.error(
+          `❌ Query failed: ${params.model}.${params.action} after ${duration}ms`,
+          error
+        );
+        throw error;
+      }
+    });
+    
+    this.logger.log('✅ Query performance monitoring enabled');
   }
 
   async onModuleDestroy() {
