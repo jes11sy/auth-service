@@ -13,9 +13,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     const databaseUrl = process.env.DATABASE_URL || '';
     const hasParams = databaseUrl.includes('?');
     
-    // Добавляем параметры connection pool если их нет в URL
+    // ✅ ОПТИМИЗИРОВАНО: Auth Service получает много коротких запросов (логин, проверка токенов)
+    // Увеличено с 10 до 25 для обработки burst нагрузки
     const connectionParams = [
-      'connection_limit=10',      // Максимум 10 соединений
+      'connection_limit=25',      // Увеличено для production нагрузки
       'pool_timeout=20',          // Таймаут получения соединения: 20s
       'connect_timeout=10',       // Таймаут подключения к БД: 10s
       'socket_timeout=60',        // Таймаут socket: 60s
@@ -39,7 +40,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     });
     
     if (needsParams) {
-      this.logger.log('✅ Connection pool configured: limit=10, pool_timeout=20s, connect_timeout=10s');
+      this.logger.log('✅ Connection pool configured: limit=25, pool_timeout=20s, connect_timeout=10s');
     }
   }
 
