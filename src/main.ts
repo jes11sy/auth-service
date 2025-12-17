@@ -13,7 +13,7 @@ const cpuCount = os.cpus().length;
 process.env.UV_THREADPOOL_SIZE = String(Math.max(cpuCount * 2, 8));
 
 /**
- * ✅ ИСПРАВЛЕНИЕ VULN-004: Валидация JWT секретов
+ * ✅ ИСПРАВЛЕНИЕ VULN-004: Валидация JWT секретов1
  * Проверяем что JWT_SECRET и JWT_REFRESH_SECRET:
  * 1. Существуют
  * 2. Не пустые
