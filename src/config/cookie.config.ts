@@ -1,0 +1,51 @@
+/**
+ * Конфигурация для работы с httpOnly cookies
+ * Используется для безопасного хранения JWT токенов на стороне клиента
+ */
+
+export const CookieConfig = {
+  // Имена cookies (префикс для избежания конфликтов)
+  ACCESS_TOKEN_NAME: '__Host-access_token',    // __Host- требует secure, path=/, без domain
+  REFRESH_TOKEN_NAME: '__Host-refresh_token',  // Дополнительная защита
+  
+  // Базовые настройки cookies
+  COOKIE_OPTIONS: {
+    httpOnly: true,                           // ✅ Защита от XSS - недоступен из JavaScript
+    secure: process.env.NODE_ENV === 'production', // ✅ HTTPS только в production
+    sameSite: 'strict' as const,              // ✅ Защита от CSRF (strict - максимальная защита)
+    path: '/',                                // Доступен на всех путях
+    // domain НЕ устанавливается явно - cookies привязаны к точному домену
+    // Это часть требований __Host- prefix для дополнительной безопасности
+  },
+  
+  // TTL для cookies (Short-lived access token, long-lived refresh token)
+  ACCESS_TOKEN_MAX_AGE: 15 * 60 * 1000,       // 15 минут (короткий срок для минимизации риска)
+  REFRESH_TOKEN_MAX_AGE: 7 * 24 * 60 * 60 * 1000, // 7 дней
+  
+  // Header для переключения на cookie mode
+  USE_COOKIES_HEADER: 'x-use-cookies',
+  
+  // Security flags
+  ENABLE_COOKIE_SIGNING: true,                // Подпись cookies для защиты от tampering
+} as const;
+
+/**
+ * Типы для работы с cookies
+ */
+export interface CookieOptions {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: 'strict' | 'lax' | 'none';
+  path: string;
+  maxAge?: number;
+}
+
+/**
+ * Проверяет, должен ли запрос использовать cookies вместо JSON
+ */
+export function shouldUseCookies(headers: Record<string, any>): boolean {
+  const useCookiesHeader = headers[CookieConfig.USE_COOKIES_HEADER] || 
+                          headers[CookieConfig.USE_COOKIES_HEADER.toUpperCase()];
+  return useCookiesHeader === 'true';
+}
+

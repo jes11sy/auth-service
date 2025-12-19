@@ -72,6 +72,11 @@ async function bootstrap() {
   const logger = new Logger('AuthService');
   const isDevelopment = process.env.NODE_ENV !== 'production';
 
+  // ✅ Cookie Plugin (для httpOnly cookies)
+  await app.register(require('@fastify/cookie'), {
+    secret: process.env.COOKIE_SECRET || process.env.JWT_SECRET, // Для подписи cookies
+  });
+
   // CORS Configuration
   await app.register(require('@fastify/cors'), {
     origin: (origin, cb) => {
@@ -89,9 +94,15 @@ async function bootstrap() {
         cb(null, false);
       }
     },
-    credentials: true,
+    credentials: true, // ✅ ВАЖНО: разрешаем отправку cookies
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin'],
+    allowedHeaders: [
+      'Content-Type', 
+      'Authorization', 
+      'Accept', 
+      'Origin',
+      'X-Use-Cookies', // ✅ Новый header для переключения на cookie mode
+    ],
     preflightContinue: false,
     optionsSuccessStatus: 204,
   });
