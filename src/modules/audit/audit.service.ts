@@ -11,6 +11,7 @@ export enum AuditEventType {
   TOKEN_REFRESH = 'auth.token.refresh',
   TOKEN_REUSE_DETECTED = 'auth.token.reuse',
   LOGOUT = 'auth.logout',
+  FORCE_LOGOUT = 'auth.force_logout',  // ✅ Принудительная деавторизация администратором
   PROFILE_ACCESS = 'auth.profile.access',
   TOKEN_VALIDATION = 'auth.token.validation',
 }
@@ -204,6 +205,33 @@ export class AuditService {
       ip,
       userAgent,
       success: true,
+    });
+  }
+
+  /**
+   * ✅ Принудительная деавторизация администратором
+   */
+  logForceLogout(
+    userId: number,
+    role: string,
+    adminId: number,
+    adminRole: string,
+    ip: string,
+    userAgent: string,
+  ): void {
+    this.log({
+      timestamp: new Date().toISOString(),
+      eventType: AuditEventType.FORCE_LOGOUT,
+      userId,
+      role: role as UserRole,
+      ip,
+      userAgent,
+      success: true,
+      metadata: {
+        adminId,
+        adminRole,
+        reason: 'Administrative action',
+      },
     });
   }
 

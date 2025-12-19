@@ -1,6 +1,7 @@
-import { Injectable, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { Injectable, ExecutionContext, UnauthorizedException, Inject } from '@nestjs/common';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { CookieConfig } from '../../../config/cookie.config';
+import { RedisService } from '../../redis/redis.service';
 
 /**
  * Guard для поддержки JWT токенов из cookies
@@ -9,9 +10,16 @@ import { CookieConfig } from '../../../config/cookie.config';
  * Приоритет извлечения токена:
  * 1. Authorization header (Bearer token) - для обратной совместимости
  * 2. Cookie access_token - новый способ (httpOnly)
+ * 
+ * ✅ Проверяет флаг принудительной деавторизации (force_logout)
  */
 @Injectable()
 export class CookieJwtAuthGuard extends JwtAuthGuard {
+  constructor(
+    @Inject(RedisService) private readonly redis: RedisService,
+  ) {
+    super();
+  }
   canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest();
     const rawRequest = request.raw as any;
@@ -51,8 +59,9 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
   
   /**
    * Обработка ошибок с понятными сообщениями
+   * ✅ Проверяет флаг принудительной деавторизации
    */
-  handleRequest(err: any, user: any, info: any) {
+  async handleRequest(err: any, user: any, info: any) {
     if (err || !user) {
       if (info?.name === 'TokenExpiredError') {
         throw new UnauthorizedException('Access token has expired. Please refresh your token.');
@@ -62,6 +71,25 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
       }
       throw err || new UnauthorizedException('Authentication required.');
     }
+
+    // ✅ FORCE LOGOUT CHECK: Проверяем флаг принудительной деавторизации
+    if (user.sub && user.role) {
+      try {
+        const isForcedLogout = await this.redis.isUserForcedLogout(user.sub, user.role);
+        if (isForcedLogout) {
+          throw new UnauthorizedException('Session terminated by administrator. Please login again.');
+        }
+      } catch (error) {
+        // Graceful degradation: если Redis недоступен, пропускаем проверку
+        // Не блокируем пользователя если инфраструктура временно недоступна
+        if (error instanceof UnauthorizedException) {
+          throw error;
+        }
+        // Логируем ошибку, но продолжаем работу
+        console.warn('Force logout check failed (Redis unavailable):', error.message);
+      }
+    }
+
     return user;
   }
 }

@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, UseGuards, Request, HttpCode, HttpStatus, Ip, Headers, Res, Req, UnauthorizedException } from '@nestjs/common';
+import { Controller, Post, Body, Get, UseGuards, Request, HttpCode, HttpStatus, Ip, Headers, Res, Req, UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { FastifyReply, FastifyRequest } from 'fastify';
@@ -245,6 +245,40 @@ export class AuthController {
   ) {
     const userAgent = this.getUserAgent(headers);
     return this.authService.getProfile(req.user, ip, userAgent);
+  }
+
+  @Post('admin/force-logout')
+  @UseGuards(CookieJwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Force logout user (admin only)' })
+  @ApiResponse({ status: 200, description: 'User forcefully logged out' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Admin role required' })
+  async forceLogout(
+    @Request() req,
+    @Body() body: { userId: number; role: string },
+    @Ip() ip: string,
+    @Headers() headers: any,
+  ) {
+    // Проверяем что запрос от админа
+    if (req.user.role !== 'admin') {
+      throw new ForbiddenException('Only administrators can force logout users');
+    }
+
+    const userAgent = this.getUserAgent(headers);
+    await this.authService.forceLogout(
+      body.userId,
+      body.role,
+      req.user.sub,
+      req.user.role,
+      ip,
+      userAgent,
+    );
+
+    return {
+      success: true,
+      message: `User #${body.userId} (${body.role}) has been forcefully logged out`,
+    };
   }
 }
 

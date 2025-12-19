@@ -226,6 +226,13 @@ export class AuthService {
       'saveRefreshTokenAndResetAttempts',
     );
 
+    // ✅ Очищаем флаг принудительной деавторизации при новом логине
+    await this.redis.safeExecute(
+      () => this.redis.clearForceLogout(user.id, user.role),
+      undefined,
+      'clearForceLogout',
+    );
+
     this.logger.log(`Login successful for ${role} user`);
     
     // ✅ AUDIT: Логируем успешный вход
@@ -499,5 +506,38 @@ export class AuthService {
     
     // ✅ AUDIT: Логируем выход из системы
     this.auditService.logLogout(userId, role, ip, userAgent);
+  }
+
+  /**
+   * Принудительная деавторизация пользователя (админ-функция)
+   * ✅ Удаляет все refresh токены
+   * ✅ Устанавливает флаг force_logout для мгновенной блокировки access токенов
+   * @param userId ID пользователя для деавторизации
+   * @param role Роль пользователя
+   * @param adminId ID администратора, выполняющего действие
+   * @param adminRole Роль администратора
+   * @param ip IP адрес администратора
+   * @param userAgent User-Agent администратора
+   */
+  async forceLogout(
+    userId: number,
+    role: string,
+    adminId: number,
+    adminRole: string,
+    ip: string = '0.0.0.0',
+    userAgent: string = 'Unknown',
+  ): Promise<void> {
+    // 1. Удаляем все refresh токены
+    await this.redis.revokeAllUserTokens(userId, role);
+    
+    // 2. Устанавливаем флаг принудительной деавторизации (действует 15 минут - как TTL access token)
+    await this.redis.forceLogoutUser(userId, role, 15 * 60);
+    
+    this.logger.warn(
+      `🔒 Force logout: ${role} user #${userId} by admin #${adminId} (${adminRole})`,
+    );
+    
+    // ✅ AUDIT: Логируем принудительную деавторизацию
+    this.auditService.logForceLogout(userId, role, adminId, adminRole, ip, userAgent);
   }
 }

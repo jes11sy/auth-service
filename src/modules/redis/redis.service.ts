@@ -43,6 +43,45 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Redis disconnected');
   }
 
+  // ==================== FORCE LOGOUT ====================
+
+  /**
+   * ✅ Принудительная деавторизация пользователя
+   * Устанавливает флаг, который проверяется в Guard на каждом запросе
+   * @param userId ID пользователя
+   * @param role Роль пользователя
+   * @param ttlSeconds TTL флага (должен быть >= TTL access токена, по умолчанию 15 минут)
+   */
+  async forceLogoutUser(
+    userId: number,
+    role: string,
+    ttlSeconds: number = 15 * 60, // 15 минут (как у access token)
+  ): Promise<void> {
+    const forceLogoutKey = `force_logout:${role}:${userId}`;
+    
+    await this.client.setex(forceLogoutKey, ttlSeconds, '1');
+    
+    this.logger.log(`🔒 Force logout flag set for user ${userId} (${role}) for ${ttlSeconds}s`);
+  }
+
+  /**
+   * Проверить флаг принудительной деавторизации
+   */
+  async isUserForcedLogout(userId: number, role: string): Promise<boolean> {
+    const forceLogoutKey = `force_logout:${role}:${userId}`;
+    const result = await this.client.get(forceLogoutKey);
+    return result === '1';
+  }
+
+  /**
+   * Очистить флаг принудительной деавторизации (при новом логине)
+   */
+  async clearForceLogout(userId: number, role: string): Promise<void> {
+    const forceLogoutKey = `force_logout:${role}:${userId}`;
+    await this.client.del(forceLogoutKey);
+    this.logger.debug(`Force logout flag cleared for user ${userId} (${role})`);
+  }
+
   // ==================== REFRESH TOKENS ====================
 
   /**
