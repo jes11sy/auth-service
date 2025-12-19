@@ -84,13 +84,15 @@ export class AuthController {
     
     if (useCookies) {
       // Новый способ: httpOnly cookies с подписью
-      res.cookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
+      // Используем raw reply для доступа к методам @fastify/cookie
+      const rawReply = res as any;
+      rawReply.setCookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.ACCESS_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING, // ✅ Подписанный cookie
       });
       
-      res.cookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
+      rawReply.setCookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.REFRESH_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING, // ✅ Подписанный cookie
@@ -161,13 +163,14 @@ export class AuthController {
     
     if (useCookies) {
       // Устанавливаем новые подписанные cookies
-      res.cookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
+      const rawReply = res as any;
+      rawReply.setCookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.ACCESS_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
-      res.cookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
+      rawReply.setCookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.REFRESH_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
@@ -203,8 +206,9 @@ export class AuthController {
     
     if (useCookies) {
       // Очищаем cookies
-      res.clearCookie(CookieConfig.ACCESS_TOKEN_NAME);
-      res.clearCookie(CookieConfig.REFRESH_TOKEN_NAME);
+      const rawReply = res as any;
+      rawReply.clearCookie(CookieConfig.ACCESS_TOKEN_NAME);
+      rawReply.clearCookie(CookieConfig.REFRESH_TOKEN_NAME);
     }
     
     return {
