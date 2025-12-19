@@ -5,8 +5,8 @@
 
 export const CookieConfig = {
   // Имена cookies (префикс для избежания конфликтов)
-  ACCESS_TOKEN_NAME: '__Host-access_token',    // __Host- требует secure, path=/, без domain
-  REFRESH_TOKEN_NAME: '__Host-refresh_token',  // Дополнительная защита
+  ACCESS_TOKEN_NAME: 'access_token',    // Обычное имя для cross-domain работы
+  REFRESH_TOKEN_NAME: 'refresh_token',  // Обычное имя для cross-domain работы
   
   // Базовые настройки cookies
   COOKIE_OPTIONS: {
@@ -14,8 +14,7 @@ export const CookieConfig = {
     secure: process.env.NODE_ENV === 'production', // ✅ HTTPS только в production
     sameSite: 'strict' as const,              // ✅ Защита от CSRF (strict - максимальная защита)
     path: '/',                                // Доступен на всех путях
-    // domain НЕ устанавливается явно - cookies привязаны к точному домену
-    // Это часть требований __Host- prefix для дополнительной безопасности
+    domain: '.lead-schem.ru',                 // Cross-domain для api.lead-schem.ru и core.lead-schem.ru
   },
   
   // TTL для cookies (Short-lived access token, long-lived refresh token)
@@ -37,6 +36,7 @@ export interface CookieOptions {
   secure: boolean;
   sameSite: 'strict' | 'lax' | 'none';
   path: string;
+  domain?: string;
   maxAge?: number;
 }
 
