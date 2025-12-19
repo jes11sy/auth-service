@@ -14,26 +14,27 @@ import { CookieConfig } from '../../../config/cookie.config';
 export class CookieJwtAuthGuard extends JwtAuthGuard {
   canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest();
+    const rawRequest = request.raw || request;
     
     // ✅ Проверяем наличие токена в signed cookies (приоритет) или обычных cookies
     let cookieToken = null;
     
     if (CookieConfig.ENABLE_COOKIE_SIGNING) {
       // Пытаемся получить подписанный cookie (защита от tampering)
-      cookieToken = request.unsignCookie?.(request.cookies?.[CookieConfig.ACCESS_TOKEN_NAME] || '')?.value;
-      
-      // Если подпись не валидна, unsignCookie вернет null или undefined
-      if (cookieToken === null || cookieToken === undefined) {
-        // Логируем потенциальную попытку подделки cookie
-        const rawCookie = request.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
-        if (rawCookie) {
+      const rawCookie = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
+      if (rawCookie) {
+        const unsigned = rawRequest.unsignCookie?.(rawCookie);
+        cookieToken = unsigned?.valid ? unsigned.value : null;
+        
+        // Если подпись не валидна
+        if (unsigned && !unsigned.valid) {
           // Cookie существует, но подпись невалидна - возможная атака
           throw new UnauthorizedException('Invalid cookie signature detected. Possible tampering attempt.');
         }
       }
     } else {
       // Fallback на обычные cookies если signing отключен
-      cookieToken = request.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
+      cookieToken = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
     }
     
     // Если токен в cookie есть и нет Authorization header - используем cookie

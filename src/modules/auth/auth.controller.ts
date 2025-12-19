@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, UseGuards, Request, HttpCode, HttpStatus, Ip, Headers, Res, Req } from '@nestjs/common';
+import { Controller, Post, Body, Get, UseGuards, Request, HttpCode, HttpStatus, Ip, Headers, Res, Req, UnauthorizedException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { FastifyReply, FastifyRequest } from 'fastify';
@@ -84,13 +84,13 @@ export class AuthController {
     
     if (useCookies) {
       // Новый способ: httpOnly cookies с подписью
-      res.setCookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
+      res.cookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.ACCESS_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING, // ✅ Подписанный cookie
       });
       
-      res.setCookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
+      res.cookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.REFRESH_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING, // ✅ Подписанный cookie
@@ -133,10 +133,11 @@ export class AuthController {
     
     if (useCookies) {
       // Получаем из signed cookies
+      const rawRequest = req.raw as any;
       if (CookieConfig.ENABLE_COOKIE_SIGNING) {
-        const signedCookie = req.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
+        const signedCookie = rawRequest.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
         if (signedCookie) {
-          const unsigned = req.unsignCookie?.(signedCookie);
+          const unsigned = rawRequest.unsignCookie?.(signedCookie);
           refreshToken = unsigned?.valid ? unsigned.value : undefined;
           
           // Если подпись невалидна - возможная атака
@@ -145,7 +146,7 @@ export class AuthController {
           }
         }
       } else {
-        refreshToken = req.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
+        refreshToken = rawRequest.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
       }
     } else {
       // Старый способ - из body
@@ -160,13 +161,13 @@ export class AuthController {
     
     if (useCookies) {
       // Устанавливаем новые подписанные cookies
-      res.setCookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
+      res.cookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.ACCESS_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
-      res.setCookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
+      res.cookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
         ...CookieConfig.COOKIE_OPTIONS,
         maxAge: CookieConfig.REFRESH_TOKEN_MAX_AGE,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
