@@ -14,28 +14,29 @@ import { CookieConfig } from '../../../config/cookie.config';
 export class CookieJwtAuthGuard extends JwtAuthGuard {
   canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest();
-    const rawRequest = request.raw as any; // Cast для доступа к Fastify-specific properties
+    const rawRequest = request.raw as any;
     
-    // ✅ В NestJS + Fastify cookies доступны через request.raw
-    // после регистрации @fastify/cookie plugin
+    // ✅ ВАЖНО: В NestJS + Fastify cookies находятся в request.cookies, а НЕ rawRequest.cookies
+    const cookies = (request as any).cookies || rawRequest.cookies || null;
+    const unsignCookie = (request as any).unsignCookie || rawRequest.unsignCookie || null;
+    
     let cookieToken = null;
     
-    if (CookieConfig.ENABLE_COOKIE_SIGNING) {
+    if (cookies && CookieConfig.ENABLE_COOKIE_SIGNING && unsignCookie) {
       // Пытаемся получить подписанный cookie (защита от tampering)
-      const signedCookie = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
-      if (signedCookie && rawRequest.unsignCookie) {
-        const unsigned = rawRequest.unsignCookie(signedCookie);
+      const signedCookie = cookies[CookieConfig.ACCESS_TOKEN_NAME];
+      if (signedCookie) {
+        const unsigned = unsignCookie(signedCookie);
         cookieToken = unsigned?.valid ? unsigned.value : null;
         
         // Если подпись не валидна
         if (unsigned && !unsigned.valid) {
-          // Cookie существует, но подпись невалидна - возможная атака
           throw new UnauthorizedException('Invalid cookie signature detected. Possible tampering attempt.');
         }
       }
-    } else {
+    } else if (cookies) {
       // Fallback на обычные cookies если signing отключен
-      cookieToken = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
+      cookieToken = cookies[CookieConfig.ACCESS_TOKEN_NAME];
     }
     
     // Если токен в cookie есть и нет Authorization header - используем cookie

@@ -12,9 +12,9 @@ export const CookieConfig = {
   COOKIE_OPTIONS: {
     httpOnly: true,                           // ✅ Защита от XSS - недоступен из JavaScript
     secure: process.env.NODE_ENV === 'production', // ✅ HTTPS только в production
-    sameSite: 'strict' as const,              // ✅ Защита от CSRF (strict - максимальная защита)
+    sameSite: 'none' as const,                // ✅ 'none' для cross-subdomain работы (strict блокирует!)
     path: '/',                                // Доступен на всех путях
-    domain: '.lead-schem.ru',                 // Cross-domain для api.lead-schem.ru и core.lead-schem.ru
+    domain: '.lead-schem.ru',                 // Cross-subdomain для api.lead-schem.ru и core.lead-schem.ru
   },
   
   // TTL для cookies (Short-lived access token, long-lived refresh token)
