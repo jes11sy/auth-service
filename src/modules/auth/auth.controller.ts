@@ -135,11 +135,12 @@ export class AuthController {
     
     if (useCookies) {
       // Получаем из signed cookies
-      const rawRequest = req.raw as any;
+      // В NestJS + Fastify cookies доступны напрямую через req
+      const reqWithCookies = req as any;
       if (CookieConfig.ENABLE_COOKIE_SIGNING) {
-        const signedCookie = rawRequest.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
-        if (signedCookie) {
-          const unsigned = rawRequest.unsignCookie?.(signedCookie);
+        const signedCookie = reqWithCookies.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
+        if (signedCookie && reqWithCookies.unsignCookie) {
+          const unsigned = reqWithCookies.unsignCookie(signedCookie);
           refreshToken = unsigned?.valid ? unsigned.value : undefined;
           
           // Если подпись невалидна - возможная атака
@@ -148,7 +149,7 @@ export class AuthController {
           }
         }
       } else {
-        refreshToken = rawRequest.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
+        refreshToken = reqWithCookies.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
       }
     } else {
       // Старый способ - из body
