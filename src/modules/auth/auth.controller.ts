@@ -247,6 +247,35 @@ export class AuthController {
     return this.authService.getProfile(req.user, ip, userAgent);
   }
 
+  @Get('socket-token')
+  @Throttle({ default: { limit: 10, ttl: 60000 } }) // ✅ 10 запросов в минуту
+  @UseGuards(CookieJwtAuthGuard)
+  @ApiOperation({ summary: '🔌 Get short-lived token for Socket.IO from httpOnly cookie' })
+  @ApiResponse({ status: 200, description: 'Socket token returned' })
+  async getSocketToken(
+    @Request() req,
+    @Req() request: FastifyRequest,
+  ) {
+    // Читаем access token из httpOnly cookie
+    const rawRequest = request as any;
+    const accessToken = rawRequest.unsignCookie(
+      rawRequest.cookies[CookieConfig.ACCESS_TOKEN_NAME]
+    );
+
+    if (!accessToken || !accessToken.valid) {
+      throw new UnauthorizedException('No valid access token in cookies');
+    }
+
+    // Возвращаем токен для Socket.IO (он уже валидный и короткоживущий - 15 минут)
+    return {
+      success: true,
+      data: {
+        token: accessToken.value,
+        expiresIn: 900, // 15 минут в секундах
+      },
+    };
+  }
+
   @Post('admin/force-logout')
   @UseGuards(CookieJwtAuthGuard)
   @HttpCode(HttpStatus.OK)
