@@ -233,7 +233,7 @@ export class AuthController {
   }
 
   @Get('profile')
-  @Throttle({ default: { limit: 30, ttl: 60000 } }) // ✅ 30 запросов профиля в минуту
+  @Throttle({ default: { limit: 100, ttl: 60000 } }) // ✅ 100 запросов профиля в минуту (увеличено для React Strict Mode)
   @UseGuards(CookieJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get user profile (supports both Authorization header and cookies)' })
