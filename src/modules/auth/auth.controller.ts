@@ -258,19 +258,27 @@ export class AuthController {
   ) {
     // Читаем access token из httpOnly cookie
     const rawRequest = request as any;
-    const accessToken = rawRequest.unsignCookie(
-      rawRequest.cookies[CookieConfig.ACCESS_TOKEN_NAME]
-    );
+    const rawCookie = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
 
-    if (!accessToken || !accessToken.valid) {
-      throw new UnauthorizedException('No valid access token in cookies');
+    if (!rawCookie) {
+      throw new UnauthorizedException('No access token in cookies');
+    }
+
+    // Извлекаем JWT из cookie (может быть с подписью - 4 части)
+    let token = rawCookie;
+    if (token.startsWith('eyJ')) {
+      const parts = token.split('.');
+      if (parts.length === 4) {
+        // Убираем старую подпись cookie
+        token = parts.slice(0, 3).join('.');
+      }
     }
 
     // Возвращаем токен для Socket.IO (он уже валидный и короткоживущий - 15 минут)
     return {
       success: true,
       data: {
-        token: accessToken.value,
+        token: token,
         expiresIn: 900, // 15 минут в секундах
       },
     };

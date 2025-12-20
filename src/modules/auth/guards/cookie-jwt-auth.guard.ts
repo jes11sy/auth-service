@@ -22,34 +22,31 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
   }
   canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest();
-    const rawRequest = request.raw as any;
     
-    // ✅ ВАЖНО: В NestJS + Fastify cookies находятся в request.cookies, а НЕ rawRequest.cookies
-    const cookies = (request as any).cookies || rawRequest.cookies || null;
-    const unsignCookie = (request as any).unsignCookie || rawRequest.unsignCookie || null;
+    // В NestJS + Fastify cookies находятся в request.cookies
+    const cookies = (request as any).cookies || (request.raw as any)?.cookies || null;
     
-    let cookieToken = null;
+    let cookieToken: string | null = null;
     
-    if (cookies && CookieConfig.ENABLE_COOKIE_SIGNING && unsignCookie) {
-      // Пытаемся получить подписанный cookie (защита от tampering)
-      const signedCookie = cookies[CookieConfig.ACCESS_TOKEN_NAME];
-      if (signedCookie) {
-        const unsigned = unsignCookie(signedCookie);
-        cookieToken = unsigned?.valid ? unsigned.value : null;
+    if (cookies) {
+      const rawCookie = cookies[CookieConfig.ACCESS_TOKEN_NAME];
+      if (rawCookie && rawCookie.startsWith('eyJ')) {
+        // ✅ JWT токен найден
+        const parts = rawCookie.split('.');
         
-        // Если подпись не валидна
-        if (unsigned && !unsigned.valid) {
-          throw new UnauthorizedException('Invalid cookie signature detected. Possible tampering attempt.');
+        if (parts.length === 3) {
+          // Стандартный JWT (header.payload.signature)
+          cookieToken = rawCookie;
+        } else if (parts.length === 4) {
+          // JWT + старая подпись cookie (миграция с signed cookies)
+          // Берём только первые 3 части
+          cookieToken = parts.slice(0, 3).join('.');
         }
       }
-    } else if (cookies) {
-      // Fallback на обычные cookies если signing отключен
-      cookieToken = cookies[CookieConfig.ACCESS_TOKEN_NAME];
     }
     
     // Если токен в cookie есть и нет Authorization header - используем cookie
     if (cookieToken && !request.headers.authorization) {
-      // Добавляем токен из cookie в заголовок для JWT strategy
       request.headers.authorization = `Bearer ${cookieToken}`;
     }
     
