@@ -206,10 +206,15 @@ export class AuthController {
     await this.authService.logout(req.user, ip, userAgent);
     
     if (useCookies) {
-      // Очищаем cookies
+      // Очищаем cookies - устанавливаем пустое значение с maxAge: 0
       const rawReply = res as any;
-      rawReply.clearCookie(CookieConfig.ACCESS_TOKEN_NAME);
-      rawReply.clearCookie(CookieConfig.REFRESH_TOKEN_NAME);
+      const clearOptions = {
+        ...CookieConfig.COOKIE_OPTIONS,
+        maxAge: 0, // Удаляем cookie немедленно
+      };
+      
+      rawReply.setCookie(CookieConfig.ACCESS_TOKEN_NAME, '', clearOptions);
+      rawReply.setCookie(CookieConfig.REFRESH_TOKEN_NAME, '', clearOptions);
     }
     
     return {
