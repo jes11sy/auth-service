@@ -270,9 +270,16 @@ export class AuthController {
     @Request() req,
     @Req() request: FastifyRequest,
   ) {
-    // Читаем access token из httpOnly cookie
+    // Читаем access token из httpOnly cookie (с учетом динамического имени)
     const rawRequest = request as any;
-    const rawCookie = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
+    const origin = request.headers.origin || request.headers.referer;
+    const accessTokenName = getCookieName(CookieConfig.ACCESS_TOKEN_NAME, origin as string);
+    
+    // Пробуем динамическое имя, потом fallback на базовое
+    let rawCookie = rawRequest.cookies?.[accessTokenName];
+    if (!rawCookie) {
+      rawCookie = rawRequest.cookies?.[CookieConfig.ACCESS_TOKEN_NAME];
+    }
 
     if (!rawCookie) {
       throw new UnauthorizedException('No access token in cookies');
