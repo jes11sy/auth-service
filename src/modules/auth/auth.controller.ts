@@ -8,7 +8,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { CookieJwtAuthGuard } from './guards/cookie-jwt-auth.guard';
 import { RedisService } from '../redis/redis.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { CookieConfig, shouldUseCookies } from '../../config/cookie.config';
+import { CookieConfig, shouldUseCookies, getCookieOptions, getCookieName } from '../../config/cookie.config';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -83,19 +83,23 @@ export class AuthController {
     const useCookies = shouldUseCookies(headers);
     
     if (useCookies) {
-      // Новый способ: httpOnly cookies с подписью
+      // Новый способ: httpOnly cookies с динамическим domain
+      const origin = headers.origin || headers.referer;
+      const accessTokenName = getCookieName(CookieConfig.ACCESS_TOKEN_NAME, origin);
+      const refreshTokenName = getCookieName(CookieConfig.REFRESH_TOKEN_NAME, origin);
+      const accessTokenOptions = getCookieOptions(origin, CookieConfig.ACCESS_TOKEN_MAX_AGE);
+      const refreshTokenOptions = getCookieOptions(origin, CookieConfig.REFRESH_TOKEN_MAX_AGE);
+      
       // Используем raw reply для доступа к методам @fastify/cookie
       const rawReply = res as any;
-      rawReply.setCookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
-        ...CookieConfig.COOKIE_OPTIONS,
-        maxAge: CookieConfig.ACCESS_TOKEN_MAX_AGE,
-        signed: CookieConfig.ENABLE_COOKIE_SIGNING, // ✅ Подписанный cookie
+      rawReply.setCookie(accessTokenName, result.data.accessToken, {
+        ...accessTokenOptions,
+        signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
-      rawReply.setCookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
-        ...CookieConfig.COOKIE_OPTIONS,
-        maxAge: CookieConfig.REFRESH_TOKEN_MAX_AGE,
-        signed: CookieConfig.ENABLE_COOKIE_SIGNING, // ✅ Подписанный cookie
+      rawReply.setCookie(refreshTokenName, result.data.refreshToken, {
+        ...refreshTokenOptions,
+        signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
       // Не отправляем токены в response body (они в cookies)
@@ -129,16 +133,18 @@ export class AuthController {
   ) {
     const userAgent = this.getUserAgent(headers);
     const useCookies = shouldUseCookies(headers);
+    const origin = headers.origin || headers.referer;
     
     // ✅ DUAL MODE: получаем refresh token из cookies ИЛИ body
     let refreshToken: string | undefined;
     
     if (useCookies) {
-      // Получаем из signed cookies
-      // В NestJS + Fastify cookies доступны напрямую через req
+      // Получаем из cookies с учетом origin
       const reqWithCookies = req as any;
+      const refreshTokenName = getCookieName(CookieConfig.REFRESH_TOKEN_NAME, origin);
+      
       if (CookieConfig.ENABLE_COOKIE_SIGNING) {
-        const signedCookie = reqWithCookies.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
+        const signedCookie = reqWithCookies.cookies?.[refreshTokenName];
         if (signedCookie && reqWithCookies.unsignCookie) {
           const unsigned = reqWithCookies.unsignCookie(signedCookie);
           refreshToken = unsigned?.valid ? unsigned.value : undefined;
@@ -149,7 +155,7 @@ export class AuthController {
           }
         }
       } else {
-        refreshToken = reqWithCookies.cookies?.[CookieConfig.REFRESH_TOKEN_NAME];
+        refreshToken = reqWithCookies.cookies?.[refreshTokenName];
       }
     } else {
       // Старый способ - из body
@@ -163,17 +169,20 @@ export class AuthController {
     const result = await this.authService.refreshToken(refreshToken, ip, userAgent);
     
     if (useCookies) {
-      // Устанавливаем новые подписанные cookies
+      // Устанавливаем новые cookies с учетом origin
+      const accessTokenName = getCookieName(CookieConfig.ACCESS_TOKEN_NAME, origin);
+      const refreshTokenName = getCookieName(CookieConfig.REFRESH_TOKEN_NAME, origin);
+      const accessTokenOptions = getCookieOptions(origin, CookieConfig.ACCESS_TOKEN_MAX_AGE);
+      const refreshTokenOptions = getCookieOptions(origin, CookieConfig.REFRESH_TOKEN_MAX_AGE);
+      
       const rawReply = res as any;
-      rawReply.setCookie(CookieConfig.ACCESS_TOKEN_NAME, result.data.accessToken, {
-        ...CookieConfig.COOKIE_OPTIONS,
-        maxAge: CookieConfig.ACCESS_TOKEN_MAX_AGE,
+      rawReply.setCookie(accessTokenName, result.data.accessToken, {
+        ...accessTokenOptions,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
-      rawReply.setCookie(CookieConfig.REFRESH_TOKEN_NAME, result.data.refreshToken, {
-        ...CookieConfig.COOKIE_OPTIONS,
-        maxAge: CookieConfig.REFRESH_TOKEN_MAX_AGE,
+      rawReply.setCookie(refreshTokenName, result.data.refreshToken, {
+        ...refreshTokenOptions,
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
@@ -202,19 +211,19 @@ export class AuthController {
   ) {
     const userAgent = this.getUserAgent(headers);
     const useCookies = shouldUseCookies(headers);
+    const origin = headers.origin || headers.referer;
     
     await this.authService.logout(req.user, ip, userAgent);
     
     if (useCookies) {
-      // Очищаем cookies - устанавливаем пустое значение с maxAge: 0
-      const rawReply = res as any;
-      const clearOptions = {
-        ...CookieConfig.COOKIE_OPTIONS,
-        maxAge: 0, // Удаляем cookie немедленно
-      };
+      // Очищаем cookies с учетом origin
+      const accessTokenName = getCookieName(CookieConfig.ACCESS_TOKEN_NAME, origin);
+      const refreshTokenName = getCookieName(CookieConfig.REFRESH_TOKEN_NAME, origin);
+      const clearOptions = getCookieOptions(origin, 0); // maxAge: 0 для удаления
       
-      rawReply.setCookie(CookieConfig.ACCESS_TOKEN_NAME, '', clearOptions);
-      rawReply.setCookie(CookieConfig.REFRESH_TOKEN_NAME, '', clearOptions);
+      const rawReply = res as any;
+      rawReply.setCookie(accessTokenName, '', clearOptions);
+      rawReply.setCookie(refreshTokenName, '', clearOptions);
     }
     
     return {
