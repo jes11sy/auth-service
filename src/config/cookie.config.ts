@@ -134,3 +134,29 @@ export function getCookieName(baseName: string, origin?: string): string {
   return baseName;
 }
 
+/**
+ * Устанавливает access и refresh токены в cookies
+ * Используется в контроллерах и интерсепторах для единообразной установки cookies
+ */
+export function setCookies(
+  response: any,
+  accessToken: string,
+  refreshToken: string,
+  origin?: string,
+): void {
+  const accessTokenName = getCookieName(CookieConfig.ACCESS_TOKEN_NAME, origin);
+  const refreshTokenName = getCookieName(CookieConfig.REFRESH_TOKEN_NAME, origin);
+  const accessTokenOptions = getCookieOptions(origin, CookieConfig.ACCESS_TOKEN_MAX_AGE);
+  const refreshTokenOptions = getCookieOptions(origin, CookieConfig.REFRESH_TOKEN_MAX_AGE);
+  
+  response.setCookie(accessTokenName, accessToken, {
+    ...accessTokenOptions,
+    signed: CookieConfig.ENABLE_COOKIE_SIGNING,
+  });
+  
+  response.setCookie(refreshTokenName, refreshToken, {
+    ...refreshTokenOptions,
+    signed: CookieConfig.ENABLE_COOKIE_SIGNING,
+  });
+}
+
