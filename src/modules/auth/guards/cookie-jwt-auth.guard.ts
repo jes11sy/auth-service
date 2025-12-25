@@ -1,4 +1,4 @@
-import { Injectable, ExecutionContext, UnauthorizedException, Inject } from '@nestjs/common';
+import { Injectable, ExecutionContext, UnauthorizedException, Inject, Logger } from '@nestjs/common';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { CookieConfig, getCookieName } from '../../../config/cookie.config';
 import { RedisService } from '../../redis/redis.service';
@@ -12,14 +12,51 @@ import { RedisService } from '../../redis/redis.service';
  * 2. Cookie access_token - новый способ (httpOnly)
  * 
  * ✅ Проверяет флаг принудительной деавторизации (force_logout)
+ * ✅ Проактивное обновление токена если осталось меньше 5 минут до истечения
  */
 @Injectable()
 export class CookieJwtAuthGuard extends JwtAuthGuard {
+  private readonly logger = new Logger(CookieJwtAuthGuard.name);
+  
   constructor(
     @Inject(RedisService) private readonly redis: RedisService,
   ) {
     super();
   }
+  
+  /**
+   * Декодирует JWT токен (без верификации) для получения payload
+   */
+  private decodeJwt(token: string): any {
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) return null;
+      
+      const payload = Buffer.from(parts[1], 'base64').toString('utf8');
+      return JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  }
+  
+  /**
+   * Проверяет, нужно ли проактивно обновить токен
+   * @returns true если до истечения осталось меньше 5 минут
+   */
+  private shouldProactivelyRefresh(token: string): boolean {
+    const payload = this.decodeJwt(token);
+    if (!payload || !payload.exp) return false;
+    
+    const expiresAt = payload.exp * 1000; // переводим в миллисекунды
+    const now = Date.now();
+    const timeLeft = expiresAt - now;
+    
+    // Обновляем если осталось меньше 5 минут (300 секунд)
+    const REFRESH_THRESHOLD = 5 * 60 * 1000;
+    
+    return timeLeft > 0 && timeLeft < REFRESH_THRESHOLD;
+  }
+  
   canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest();
     
@@ -52,6 +89,12 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
           // JWT + старая подпись cookie (миграция с signed cookies)
           // Берём только первые 3 части
           cookieToken = parts.slice(0, 3).join('.');
+        }
+        
+        // 🔄 ПРОАКТИВНОЕ ОБНОВЛЕНИЕ: помечаем запрос если нужен refresh
+        if (cookieToken && this.shouldProactivelyRefresh(cookieToken)) {
+          this.logger.debug(`🔄 Token expires soon, marking for proactive refresh`);
+          request.__needsProactiveRefresh = true;
         }
       }
     }

@@ -207,12 +207,11 @@ export class AuthService {
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL),
+      expiresIn: '7d', // 🔒 Захардкожено: Refresh token живёт 7 дней
     });
 
     // ✅ ИСПРАВЛЕНИЕ #12: Redis Pipelining - сохраняем токен И сбрасываем attempts за 1 round trip
-    const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL);
-    const refreshTTL = parseExpirationToSeconds(refreshExpirationStr);
+    const refreshTTL = 7 * 24 * 60 * 60; // 🔒 Захардкожено: 7 дней в секундах
     
     await this.redis.safeExecute(
       () => this.redis.saveRefreshTokenAndResetAttempts(
@@ -328,12 +327,11 @@ export class AuthService {
       const newAccessToken = this.jwtService.sign(newPayload);
       const newRefreshToken = this.jwtService.sign(newPayload, {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-        expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL),
+        expiresIn: '7d', // 🔒 Захардкожено: Refresh token живёт 7 дней
       });
 
       // Сохраняем новый refresh токен в Redis
-      const refreshExpirationStr = this.configService.get<string>('JWT_REFRESH_EXPIRATION', SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL);
-      const refreshTTL = parseExpirationToSeconds(refreshExpirationStr);
+      const refreshTTL = 7 * 24 * 60 * 60; // 🔒 Захардкожено: 7 дней в секундах
       await this.redis.saveRefreshToken(payload.sub, payload.role, newRefreshToken, refreshTTL);
 
       this.logger.log(`Token refreshed for ${payload.role} user`);
