@@ -202,7 +202,14 @@ export class SessionsController {
       },
     });
 
-    let currentSession = null;
+    let currentSession: {
+      device: string;
+      deviceType: 'mobile' | 'tablet' | 'desktop';
+      ip: string;
+      loginDate: string;
+      lastActivity: string;
+    } | null = null;
+    
     if (lastLogin) {
       const parsedUA = parseUserAgent(lastLogin.userAgent);
       currentSession = {
