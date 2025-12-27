@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { UserRole } from '../auth/interfaces/auth.interface';
+import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * Типы событий аудита безопасности
@@ -51,15 +52,40 @@ export interface AuditLogEntry {
 export class AuditService {
   private readonly logger = new Logger(AuditService.name);
 
+  constructor(private readonly prisma: PrismaService) {}
+
   /**
    * Базовый метод логирования событий аудита
+   * ✅ Теперь пишет в БД + консоль
    */
-  log(entry: AuditLogEntry): void {
-    // JSON формат для парсинга в SIEM системах
+  async log(entry: AuditLogEntry): Promise<void> {
+    const timestamp = entry.timestamp || new Date().toISOString();
+    
+    // 1. JSON формат для парсинга в SIEM системах (консоль)
     this.logger.log(JSON.stringify({
       ...entry,
-      timestamp: entry.timestamp || new Date().toISOString(),
+      timestamp,
     }));
+
+    // 2. ✅ Сохраняем в БД для долгосрочного хранения
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          timestamp: new Date(timestamp),
+          eventType: entry.eventType,
+          userId: entry.userId,
+          role: entry.role,
+          login: entry.login,
+          ip: entry.ip,
+          userAgent: entry.userAgent,
+          success: entry.success,
+          metadata: entry.metadata || {},
+        },
+      });
+    } catch (error) {
+      // Если БД недоступна - логируем ошибку, но не падаем
+      this.logger.error(`Failed to save audit log to DB: ${error.message}`);
+    }
 
     // TODO: Опционально - отправка в внешние системы:
     // - await this.elasticsearchService.index({ index: 'audit-logs', body: entry });
@@ -70,14 +96,14 @@ export class AuditService {
   /**
    * Успешный вход в систему
    */
-  logLoginSuccess(
+  async logLoginSuccess(
     userId: number,
     role: UserRole,
     login: string,
     ip: string,
     userAgent: string,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.LOGIN_SUCCESS,
       userId,
@@ -92,15 +118,15 @@ export class AuditService {
   /**
    * Неудачная попытка входа
    */
-  logLoginFailed(
+  async logLoginFailed(
     login: string,
     role: UserRole,
     ip: string,
     userAgent: string,
     reason: string,
     attemptsCount?: number,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.LOGIN_FAILED,
       role,
@@ -118,14 +144,14 @@ export class AuditService {
   /**
    * Блокировка учетной записи из-за превышения попыток входа
    */
-  logLoginBlocked(
+  async logLoginBlocked(
     login: string,
     role: UserRole,
     ip: string,
     userAgent: string,
     lockDurationMinutes: number,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.LOGIN_BLOCKED,
       role,
@@ -144,13 +170,13 @@ export class AuditService {
   /**
    * Обновление токена доступа
    */
-  logTokenRefresh(
+  async logTokenRefresh(
     userId: number,
     role: UserRole,
     ip: string,
     userAgent: string,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.TOKEN_REFRESH,
       userId,
@@ -165,13 +191,13 @@ export class AuditService {
    * Детекция повторного использования отозванного токена (Token Reuse Attack)
    * Это критическое событие безопасности!
    */
-  logTokenReuse(
+  async logTokenReuse(
     userId: number,
     role: UserRole,
     ip: string,
     userAgent: string,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.TOKEN_REUSE_DETECTED,
       userId,
@@ -191,13 +217,13 @@ export class AuditService {
   /**
    * Выход пользователя из системы
    */
-  logLogout(
+  async logLogout(
     userId: number,
     role: UserRole,
     ip: string,
     userAgent: string,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.LOGOUT,
       userId,
@@ -211,15 +237,15 @@ export class AuditService {
   /**
    * ✅ Принудительная деавторизация администратором
    */
-  logForceLogout(
+  async logForceLogout(
     userId: number,
     role: string,
     adminId: number,
     adminRole: string,
     ip: string,
     userAgent: string,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.FORCE_LOGOUT,
       userId,
@@ -238,14 +264,14 @@ export class AuditService {
   /**
    * Доступ к профилю пользователя
    */
-  logProfileAccess(
+  async logProfileAccess(
     userId: number,
     role: UserRole,
     ip: string,
     userAgent: string,
     cacheHit: boolean,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.PROFILE_ACCESS,
       userId,
@@ -260,14 +286,14 @@ export class AuditService {
   /**
    * Валидация JWT токена
    */
-  logTokenValidation(
+  async logTokenValidation(
     userId: number,
     role: UserRole,
     ip: string,
     userAgent: string,
     valid: boolean,
-  ): void {
-    this.log({
+  ): Promise<void> {
+    await this.log({
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.TOKEN_VALIDATION,
       userId,

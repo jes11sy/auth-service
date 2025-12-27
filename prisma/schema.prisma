@@ -90,3 +90,22 @@ enum UserRole {
   MASTER
 }
 
+// Audit logs для безопасности и мониторинга
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  timestamp DateTime @default(now())
+  eventType String   @db.VarChar(100)
+  userId    Int?
+  role      String?  @db.VarChar(50)
+  login     String?  @db.VarChar(255)
+  ip        String   @db.VarChar(45)
+  userAgent String   @db.Text
+  success   Boolean
+  metadata  Json?    @db.JsonB
+
+  @@index([userId, timestamp(sort: Desc)])
+  @@index([eventType, timestamp(sort: Desc)])
+  @@index([timestamp(sort: Desc)])
+  @@map("audit_logs")
+}
+
