@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { UserRole } from '../auth/interfaces/auth.interface';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 
 /**
  * Типы событий аудита безопасности
@@ -52,14 +53,37 @@ export interface AuditLogEntry {
 export class AuditService {
   private readonly logger = new Logger(AuditService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   /**
    * Базовый метод логирования событий аудита
    * ✅ Теперь пишет в БД + консоль
+   * ✅ Throttling для profile.access и token.refresh (макс раз в 5 минут)
    */
   async log(entry: AuditLogEntry): Promise<void> {
     const timestamp = entry.timestamp || new Date().toISOString();
+    
+    // 🔥 Throttling для мусорных событий
+    const throttleEvents = [
+      AuditEventType.PROFILE_ACCESS,
+      AuditEventType.TOKEN_REFRESH,
+    ];
+    
+    if (throttleEvents.includes(entry.eventType as AuditEventType) && entry.userId) {
+      const throttleKey = `audit:throttle:${entry.userId}:${entry.eventType}`;
+      const exists = await this.redis.get(throttleKey);
+      
+      if (exists) {
+        // Уже логировали это событие для этого юзера в последние 5 минут - пропускаем
+        return;
+      }
+      
+      // Устанавливаем флаг на 5 минут (300 секунд)
+      await this.redis.set(throttleKey, '1', 300);
+    }
     
     // 1. JSON формат для парсинга в SIEM системах (консоль)
     this.logger.log(JSON.stringify({
