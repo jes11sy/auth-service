@@ -2,7 +2,6 @@ import { Controller, Get, Query, UseGuards, Request, ForbiddenException } from '
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { CookieJwtAuthGuard } from '../auth/guards/cookie-jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
-import { UserRole } from '../auth/interfaces/auth.interface';
 
 interface AuditLogQuery {
   userId?: string;
@@ -27,7 +26,7 @@ export class AuditController {
   @ApiResponse({ status: 403, description: 'Forbidden' })
   async getUserLogs(@Query() query: AuditLogQuery, @Request() req) {
     // Только админ может просматривать логи
-    if (req.user.role !== UserRole.admin) {
+    if (req.user.role !== 'admin') {
       throw new ForbiddenException('Only administrators can view user logs');
     }
 
@@ -121,7 +120,7 @@ export class AuditController {
 
       switch (role) {
         case 'admin':
-          user = await this.prisma.admin.findUnique({ where: { id: userId } });
+          user = await this.prisma.callcentreAdmin.findUnique({ where: { id: userId } });
           break;
         case 'director':
           user = await this.prisma.director.findUnique({ where: { id: userId } });
