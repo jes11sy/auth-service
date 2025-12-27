@@ -109,3 +109,25 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+model ErrorLog {
+  id            Int      @id @default(autoincrement())
+  timestamp     DateTime @default(now())
+  service       String   @db.VarChar(100)
+  errorType     String   @map("error_type") @db.VarChar(255)
+  errorMessage  String   @map("error_message") @db.Text
+  stackTrace    String?  @map("stack_trace") @db.Text
+  userId        Int?     @map("user_id")
+  userRole      String?  @map("user_role") @db.VarChar(50)
+  requestUrl    String?  @map("request_url") @db.VarChar(500)
+  requestMethod String?  @map("request_method") @db.VarChar(10)
+  ip            String?  @db.VarChar(45)
+  userAgent     String?  @map("user_agent") @db.Text
+  metadata      Json?    @db.JsonB
+
+  @@index([timestamp(sort: Desc)])
+  @@index([service, timestamp(sort: Desc)])
+  @@index([errorType])
+  @@index([userId])
+  @@map("error_logs")
+}
+

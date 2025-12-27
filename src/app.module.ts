@@ -7,6 +7,8 @@ import { AuthModule } from './modules/auth/auth.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
+import { AuditModule } from './modules/audit/audit.module';
+import { ErrorLogsModule } from './modules/errors/error-logs.module';
 
 @Module({
   imports: [
@@ -35,6 +37,8 @@ import { SessionsModule } from './modules/sessions/sessions.module';
     RedisModule,
     AuthModule,
     SessionsModule,
+    AuditModule,
+    ErrorLogsModule,
   ],
 })
 export class AppModule {}
