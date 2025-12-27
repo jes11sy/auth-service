@@ -59,7 +59,7 @@ export class SessionsController {
     const keys = await this.getAllUserTokenKeys();
 
     for (const key of keys) {
-      const match = key.match(/user_tokens:(.*?):(\\d+)/);
+      const match = key.match(/user_tokens:(.*?):(\d+)/);
       if (!match) continue;
 
       const role = match[1];
