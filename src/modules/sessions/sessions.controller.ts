@@ -297,7 +297,7 @@ export class SessionsController {
       if (role === 'admin') {
         const user = await this.prisma.callcentreAdmin.findUnique({ where: { id: userId } });
         return user?.login || null;
-      } else if (role === 'callcenter') {
+      } else if (role === 'operator' || role === 'callcenter') {
         const user = await this.prisma.callcentreOperator.findUnique({ where: { id: userId } });
         return user?.name || null;
       } else if (role === 'director') {
