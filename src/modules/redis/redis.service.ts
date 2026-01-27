@@ -584,10 +584,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   /**
    * ✅ ИСПРАВЛЕНИЕ #13: Безопасное выполнение операции с fallback
    * Если Redis недоступен - логируем и продолжаем работу
+   * fallbackValue может быть значением или функцией (для ленивой инициализации)
    */
   async safeExecute<T>(
     operation: () => Promise<T>,
-    fallbackValue: T,
+    fallbackValue: T | (() => T) | (() => Promise<T>),
     operationName: string,
   ): Promise<T> {
     try {
@@ -596,6 +597,10 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Redis operation "${operationName}" failed, using fallback. Error: ${error.message}`,
       );
+      // Если fallback — функция, вызываем её
+      if (typeof fallbackValue === 'function') {
+        return await (fallbackValue as () => T | Promise<T>)();
+      }
       return fallbackValue;
     }
   }
