@@ -2,6 +2,7 @@
 FROM node:20-alpine AS builder
 
 # Install OpenSSL for Prisma
+# hadolint ignore=DL3018
 RUN apk add --no-cache openssl
 
 WORKDIR /app
@@ -16,16 +17,14 @@ RUN npm install && npm cache clean --force
 # Copy source code
 COPY . .
 
-# Generate Prisma Client
-RUN npx prisma generate
-
-# Build application
-RUN npm run build
+# Generate Prisma Client and build application
+RUN npx prisma generate && npm run build
 
 # Production stage
 FROM node:20-alpine
 
 # Install OpenSSL for Prisma
+# hadolint ignore=DL3018
 RUN apk add --no-cache openssl
 
 WORKDIR /app
@@ -33,8 +32,7 @@ WORKDIR /app
 # Copy package files and install only production dependencies
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/prisma ./prisma
-RUN npm install --production && npm cache clean --force
-RUN npx prisma generate
+RUN npm install --production && npm cache clean --force && npx prisma generate
 
 # Copy built application
 COPY --from=builder /app/dist ./dist
