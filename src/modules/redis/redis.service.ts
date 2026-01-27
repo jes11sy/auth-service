@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { SecurityConfig } from '../../config/security.config';
 
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
@@ -11,17 +12,56 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     try {
-      this.client = new Redis({
-        host: this.configService.get<string>('REDIS_HOST', 'localhost'),
-        port: this.configService.get<number>('REDIS_PORT', 6379),
-        password: this.configService.get<string>('REDIS_PASSWORD'),
-        db: this.configService.get<number>('REDIS_DB', 0),
+      // ✅ FIX: Поддержка Redis Sentinel для High Availability
+      const redisMode = this.configService.get<string>('REDIS_MODE', 'standalone');
+      const redisPassword = this.configService.get<string>('REDIS_PASSWORD');
+      const redisDb = this.configService.get<number>('REDIS_DB', 0);
+      
+      const commonOptions = {
+        password: redisPassword,
+        db: redisDb,
         retryStrategy: (times: number) => {
-          const delay = Math.min(times * 50, 2000);
-          return delay;
+          if (times > 100) {
+            this.logger.error('Redis connection failed after 100 retries, stopping reconnection');
+            return null;
+          }
+          return Math.min(times * 50, 2000);
         },
         maxRetriesPerRequest: 3,
-      });
+        lazyConnect: false,
+        enableReadyCheck: true,
+        commandTimeout: 5000,
+        connectTimeout: 10000,
+        keepAlive: 30000,
+      };
+
+      if (redisMode === 'sentinel') {
+        // Sentinel mode для High Availability
+        const sentinelHost = this.configService.get<string>('REDIS_SENTINEL_HOST', 'redis-sentinel');
+        const sentinelPort = this.configService.get<number>('REDIS_SENTINEL_PORT', 26379);
+        const sentinelName = this.configService.get<string>('REDIS_SENTINEL_NAME', 'mymaster');
+        
+        this.logger.log(`🔄 Connecting to Redis via Sentinel: ${sentinelHost}:${sentinelPort}, master: ${sentinelName}`);
+        
+        this.client = new Redis({
+          sentinels: [{ host: sentinelHost, port: sentinelPort }],
+          name: sentinelName,
+          sentinelPassword: redisPassword,
+          ...commonOptions,
+        });
+      } else {
+        // Standalone mode (default)
+        const redisHost = this.configService.get<string>('REDIS_HOST', 'localhost');
+        const redisPort = this.configService.get<number>('REDIS_PORT', 6379);
+        
+        this.logger.log(`🔄 Connecting to Redis standalone: ${redisHost}:${redisPort}`);
+        
+        this.client = new Redis({
+          host: redisHost,
+          port: redisPort,
+          ...commonOptions,
+        });
+      }
 
       this.client.on('connect', () => {
         this.logger.log('✅ Redis connected successfully');
@@ -86,6 +126,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * ✅ ОПТИМИЗИРОВАНО: Сохранить refresh токен в Redis с SET для быстрого удаления всех токенов
+   * ✅ FIX: Добавлено ограничение максимального количества сессий
    * @param userId ID пользователя
    * @param role Роль пользователя
    * @param token Refresh токен
@@ -99,6 +140,30 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const tokenKey = `refresh_token:${role}:${userId}:${token}`;
     const userTokensSet = `user_tokens:${role}:${userId}`;
+    
+    // ✅ FIX: Проверяем количество существующих сессий
+    const currentSessionCount = await this.client.scard(userTokensSet);
+    
+    if (currentSessionCount >= SecurityConfig.MAX_SESSIONS_PER_USER) {
+      // Удаляем самые старые токены (FIFO через SPOP не гарантирован, используем SRANDMEMBER + SREM)
+      const tokensToRemove = currentSessionCount - SecurityConfig.MAX_SESSIONS_PER_USER + 1;
+      const oldTokens = await this.client.srandmember(userTokensSet, tokensToRemove);
+      
+      if (oldTokens && oldTokens.length > 0) {
+        const pipeline = this.client.pipeline();
+        for (const oldToken of oldTokens) {
+          const oldTokenKey = `refresh_token:${role}:${userId}:${oldToken}`;
+          pipeline.del(oldTokenKey);
+          pipeline.srem(userTokensSet, oldToken);
+        }
+        await pipeline.exec();
+        
+        this.logger.warn(
+          `⚠️ Session limit reached for user ${userId} (${role}). ` +
+          `Removed ${oldTokens.length} old session(s). Max: ${SecurityConfig.MAX_SESSIONS_PER_USER}`,
+        );
+      }
+    }
     
     // Используем pipeline для атомарности и производительности
     const pipeline = this.client.pipeline();
@@ -189,12 +254,21 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Fallback метод: удаление токенов через SCAN (используется если SET метод не сработал)
+   * ✅ FIX #8: Добавлен мониторинг и предупреждения о производительности
    * @private
    */
   private async revokeAllUserTokensViaScan(userId: number, role: string): Promise<void> {
+    const startTime = Date.now();
     const pattern = `refresh_token:${role}:${userId}:*`;
     const keysToDelete: string[] = [];
     let cursor = '0';
+    let scanIterations = 0;
+
+    // ✅ FIX #8: Добавляем мониторинг SCAN операции
+    this.logger.warn(
+      `⚠️ Using SCAN fallback for token revocation (user ${userId}, role ${role}). ` +
+      `This may be slow with many tokens.`,
+    );
 
     // Используем SCAN для итеративного поиска ключей
     do {
@@ -208,21 +282,43 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       
       cursor = result[0];
       const keys = result[1];
+      scanIterations++;
       
       if (keys.length > 0) {
         keysToDelete.push(...keys);
+      }
+      
+      // ✅ FIX #8: Защита от бесконечного цикла при большом количестве ключей
+      if (scanIterations > SecurityConfig.SCAN_MAX_ITERATIONS) {
+        this.logger.error(
+          `🚨 SCAN exceeded ${SecurityConfig.SCAN_MAX_ITERATIONS} iterations for user ${userId} (${role}). ` +
+          `Found ${keysToDelete.length} keys so far. Breaking to prevent hang.`,
+        );
+        break;
       }
     } while (cursor !== '0');
 
     // Удаляем найденные ключи батчами
     if (keysToDelete.length > 0) {
-      const batchSize = 100;
+      const batchSize = SecurityConfig.SCAN_BATCH_SIZE;
       for (let i = 0; i < keysToDelete.length; i += batchSize) {
         const batch = keysToDelete.slice(i, i + batchSize);
         await this.client.del(...batch);
       }
+    }
+    
+    const duration = Date.now() - startTime;
+    
+    // ✅ FIX #8: Логируем метрики для мониторинга
+    if (duration > 1000) {
+      this.logger.error(
+        `🐌 SLOW: SCAN token revocation took ${duration}ms for user ${userId} (${role}). ` +
+        `Iterations: ${scanIterations}, Tokens deleted: ${keysToDelete.length}`,
+      );
+    } else {
       this.logger.debug(
-        `All tokens revoked via SCAN for user ${userId} (${role}): ${keysToDelete.length} tokens deleted`,
+        `All tokens revoked via SCAN for user ${userId} (${role}): ` +
+        `${keysToDelete.length} tokens deleted in ${duration}ms (${scanIterations} iterations)`,
       );
     }
   }
@@ -345,10 +441,34 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * ✅ FIX #9: Атомарная установка значения только если ключ не существует (SETNX)
+   * Оптимизация для throttling - 1 round-trip вместо GET + SET
+   * @returns true если ключ был установлен, false если уже существовал
+   */
+  async setNX(key: string, value: string, ttlSeconds?: number): Promise<boolean> {
+    if (ttlSeconds) {
+      // SET key value EX seconds NX - атомарная операция
+      const result = await this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+      return result === 'OK';
+    } else {
+      const result = await this.client.setnx(key, value);
+      return result === 1;
+    }
+  }
+
+  /**
    * Общий метод для получения значения
    */
   async get(key: string): Promise<string | null> {
     return await this.client.get(key);
+  }
+
+  /**
+   * ✅ FIX #10: Получение клиента Redis для продвинутых операций
+   * Используется для batch операций и connection pooling
+   */
+  getClient(): Redis {
+    return this.client;
   }
 
   /**
@@ -407,6 +527,56 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.logger.debug(
       `Refresh token saved with SET, login attempts reset for user ${userId} (${role}) via optimized pipeline`,
     );
+  }
+
+  // ==================== OPTIMIZED CACHE OPERATIONS ====================
+
+  /**
+   * ✅ FIX: Атомарная операция GET + SETNX для cache stampede protection
+   * Выполняется за 1 round-trip через Lua script
+   * @returns { cached: string | null, lockAcquired: boolean }
+   */
+  async getOrLock(
+    cacheKey: string, 
+    lockKey: string, 
+    lockTTL: number = 5
+  ): Promise<{ cached: string | null; lockAcquired: boolean }> {
+    // Lua script: атомарно проверяет кеш и захватывает lock если кеш пуст
+    const luaScript = `
+      local cached = redis.call('GET', KEYS[1])
+      if cached then
+        return {cached, 0}
+      end
+      local locked = redis.call('SET', KEYS[2], '1', 'EX', ARGV[1], 'NX')
+      if locked then
+        return {nil, 1}
+      end
+      return {nil, 0}
+    `;
+
+    try {
+      const result = await this.client.eval(
+        luaScript, 
+        2, 
+        cacheKey, 
+        lockKey, 
+        lockTTL
+      ) as [string | null, number];
+      
+      return {
+        cached: result[0],
+        lockAcquired: result[1] === 1,
+      };
+    } catch (error) {
+      this.logger.warn(`Lua script failed, falling back to separate calls: ${error.message}`);
+      // Fallback на отдельные вызовы
+      const cached = await this.get(cacheKey);
+      if (cached) {
+        return { cached, lockAcquired: false };
+      }
+      const lockAcquired = await this.setNX(lockKey, '1', lockTTL);
+      return { cached: null, lockAcquired };
+    }
   }
 
   // ==================== GRACEFUL DEGRADATION ====================

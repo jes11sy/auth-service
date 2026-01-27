@@ -1,11 +1,14 @@
 /**
  * Перечисление ролей пользователей
  */
+// ✅ FIX #83: Унифицированный enum ролей
 export enum UserRole {
   ADMIN = 'admin',
-  OPERATOR = 'operator',
-  DIRECTOR = 'director',
   MASTER = 'master',
+  DIRECTOR = 'director',
+  CALLCENTRE_ADMIN = 'callcentre_admin',
+  CALLCENTRE_OPERATOR = 'callcentre_operator',
+  OPERATOR = 'operator',
 }
 
 /**

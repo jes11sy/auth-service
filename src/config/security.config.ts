@@ -12,7 +12,8 @@ export const SecurityConfig = {
   
   // JWT конфигурация (значения по умолчанию, переопределяются через ENV)
   ACCESS_TOKEN_DEFAULT_TTL: '15m',
-  REFRESH_TOKEN_DEFAULT_TTL: '7d',
+  REFRESH_TOKEN_DEFAULT_TTL: '90d', // ✅ FIX: Синхронизировано с cookie TTL (90 дней)
+  REFRESH_TOKEN_TTL_SECONDS: 90 * 24 * 60 * 60, // ✅ FIX: 90 дней в секундах
   
   // Rate limiting (для будущей реализации)
   GLOBAL_RATE_LIMIT: 500,
@@ -25,6 +26,15 @@ export const SecurityConfig = {
   
   // Кеширование профилей
   PROFILE_CACHE_TTL: 900, // 15 минут
+  
+  // ✅ FIX: Cache stampede protection - вынесены из hardcode
+  PROFILE_LOCK_TTL_SECONDS: 5,        // TTL distributed lock для профиля
+  PROFILE_LOCK_MAX_WAIT_ATTEMPTS: 10, // Макс. попыток ожидания lock
+  PROFILE_LOCK_WAIT_INTERVAL_MS: 100, // Интервал между попытками
+  
+  // ✅ FIX: SCAN protection
+  SCAN_MAX_ITERATIONS: 1000,          // Макс. итераций SCAN для защиты от зависания
+  SCAN_BATCH_SIZE: 100,               // Размер batch при SCAN
   
   // Преобразование времени
   SECONDS_PER_MINUTE: 60,
@@ -40,6 +50,19 @@ export const SecurityConfig = {
   
   // Graceful shutdown
   SHUTDOWN_TIMEOUT_MS: 5000, // 5 секунд
+  
+  // ✅ FIX: Force logout и proactive refresh
+  FORCE_LOGOUT_TTL_SECONDS: 15 * 60,    // 15 минут (должен быть >= access token TTL)
+  PROACTIVE_REFRESH_THRESHOLD_MS: 5 * 60 * 1000, // 5 минут до истечения токена
+  
+  // ✅ FIX: Ограничение сессий на пользователя
+  MAX_SESSIONS_PER_USER: 100,           // Макс. активных refresh токенов на пользователя
+  
+  // ✅ FIX: Валидация паролей
+  MIN_PASSWORD_LENGTH: 8,   // Минимальная длина пароля
+  MAX_PASSWORD_LENGTH: 128, // Максимальная длина пароля
+  MIN_LOGIN_LENGTH: 2,      // Минимальная длина логина
+  MAX_LOGIN_LENGTH: 50,     // Максимальная длина логина
 } as const;
 
 /**

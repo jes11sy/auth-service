@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, Logger, ForbiddenException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
@@ -18,9 +18,14 @@ import { SecurityConfig, parseExpirationToSeconds, secondsToMinutes } from '../.
 import { AuditService } from '../audit/audit.service';
 
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleInit {
   private readonly logger = new Logger(AuthService.name);
-  private dummyHash: string;
+  // ✅ FIX: Инициализируем синхронно fallback значением для защиты от race condition
+  private dummyHash: string = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYzNGJ3zHHO';
+  
+  // ✅ FIX #4: In-memory rate limiter как fallback при падении Redis
+  private readonly memoryRateLimiter = new Map<string, { attempts: number; lastAttempt: Date }>();
+  private readonly MEMORY_LOCK_TTL_MS = 15 * 60 * 1000; // 15 минут (соответствует SecurityConfig.ACCOUNT_LOCK_DURATION)
 
   constructor(
     private prisma: PrismaService,
@@ -28,26 +33,85 @@ export class AuthService {
     private configService: ConfigService,
     private redis: RedisService,
     private auditService: AuditService,
-  ) {
-    // ✅ ИСПРАВЛЕНИЕ: Генерируем dummy hash при старте сервиса
-    // Используется для защиты от timing attack
-    this.initializeDummyHash();
+  ) {}
+
+  /**
+   * ✅ FIX: Lifecycle hook - гарантирует инициализацию ДО обработки запросов
+   * Это устраняет race condition - NestJS ждёт завершения onModuleInit
+   */
+  async onModuleInit(): Promise<void> {
+    await this.initializeDummyHash();
+    this.logger.log('✅ AuthService initialized successfully');
   }
 
   /**
    * Генерация dummy hash для защиты от timing attack
-   * Выполняется один раз при инициализации сервиса
+   * Выполняется асинхронно, но fallback уже установлен синхронно
    */
   private async initializeDummyHash(): Promise<void> {
     try {
       // Генерируем случайный dummy hash с уникальным seed
       const randomSeed = `dummy_${Date.now()}_${Math.random()}`;
-      this.dummyHash = await bcrypt.hash(randomSeed, SecurityConfig.BCRYPT_ROUNDS);
+      const newHash = await bcrypt.hash(randomSeed, SecurityConfig.BCRYPT_ROUNDS);
+      this.dummyHash = newHash;
       this.logger.log('✅ Dummy hash initialized for timing attack protection');
     } catch (error) {
-      // Fallback на статичный hash если генерация не удалась
-      this.dummyHash = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYzNGJ3zHHO';
+      // Fallback уже установлен в инициализаторе поля
       this.logger.warn('⚠️ Using fallback dummy hash due to initialization error');
+    }
+  }
+
+  /**
+   * ✅ FIX #4: Проверка блокировки в in-memory fallback при недоступности Redis
+   */
+  private checkMemoryRateLimiter(identifier: string): boolean {
+    const record = this.memoryRateLimiter.get(identifier);
+    if (!record) return false;
+    
+    // Проверяем истёк ли срок блокировки
+    const isExpired = Date.now() - record.lastAttempt.getTime() > this.MEMORY_LOCK_TTL_MS;
+    if (isExpired) {
+      this.memoryRateLimiter.delete(identifier);
+      return false;
+    }
+    
+    return record.attempts >= SecurityConfig.MAX_LOGIN_ATTEMPTS;
+  }
+
+  /**
+   * ✅ FIX #4: Регистрация неудачной попытки в in-memory fallback
+   */
+  private incrementMemoryRateLimiter(identifier: string): void {
+    const record = this.memoryRateLimiter.get(identifier);
+    const now = new Date();
+    
+    if (record) {
+      // Если прошло больше TTL с последней попытки, сбрасываем счётчик
+      const isExpired = Date.now() - record.lastAttempt.getTime() > this.MEMORY_LOCK_TTL_MS;
+      if (isExpired) {
+        this.memoryRateLimiter.set(identifier, { attempts: 1, lastAttempt: now });
+      } else {
+        record.attempts += 1;
+        record.lastAttempt = now;
+      }
+    } else {
+      this.memoryRateLimiter.set(identifier, { attempts: 1, lastAttempt: now });
+    }
+    
+    // Очистка старых записей (garbage collection)
+    this.cleanupMemoryRateLimiter();
+  }
+
+  /**
+   * ✅ FIX #4: Очистка устаревших записей из in-memory rate limiter
+   */
+  private cleanupMemoryRateLimiter(): void {
+    const now = Date.now();
+    for (const [identifier, record] of this.memoryRateLimiter.entries()) {
+      const isExpired = now - record.lastAttempt.getTime() > this.MEMORY_LOCK_TTL_MS;
+      if (isExpired) {
+        this.memoryRateLimiter.delete(identifier);
+      }
     }
   }
 
@@ -60,29 +124,63 @@ export class AuthService {
     let user: any = null;
 
     try {
-      // Загружаем пользователя в зависимости от роли
+      // ✅ FIX: Загружаем только необходимые поля через select для оптимизации
       switch (role as UserRole) {
         case UserRole.ADMIN:
           user = await this.prisma.callcentreAdmin.findUnique({
             where: { login },
+            select: {
+              id: true,
+              login: true,
+              password: true,
+              note: true,
+            },
           });
           break;
 
         case UserRole.OPERATOR:
           user = await this.prisma.callcentreOperator.findUnique({
             where: { login },
+            select: {
+              id: true,
+              name: true,
+              login: true,
+              password: true,
+              city: true,
+              status: true,
+              statusWork: true,
+              sipAddress: true,
+            },
           });
           break;
 
         case UserRole.DIRECTOR:
           user = await this.prisma.director.findUnique({
             where: { login },
+            select: {
+              id: true,
+              name: true,
+              login: true,
+              password: true,
+              cities: true,
+              tgId: true,
+            },
           });
           break;
 
         case UserRole.MASTER:
           user = await this.prisma.master.findUnique({
             where: { login },
+            select: {
+              id: true,
+              name: true,
+              login: true,
+              password: true,
+              cities: true,
+              statusWork: true,
+              tgId: true,
+              chatId: true,
+            },
           });
           break;
 
@@ -136,12 +234,12 @@ export class AuthService {
   async login(loginDto: LoginDto, ip: string = '0.0.0.0', userAgent: string = 'Unknown'): Promise<LoginResponse> {
     const { login, password, role } = loginDto;
 
-    // ✅ ИСПРАВЛЕНИЕ #13: Graceful degradation - если Redis недоступен, продолжаем без brute-force защиты
+    // ✅ FIX #4: Rate limiting с fallback на in-memory при недоступности Redis
     const lockIdentifier = `${login}:${role}`;
     
     const isLocked = await this.redis.safeExecute(
       () => this.redis.isAccountLocked(lockIdentifier, SecurityConfig.MAX_LOGIN_ATTEMPTS),
-      false, // fallback: не блокируем если Redis недоступен
+      () => this.checkMemoryRateLimiter(lockIdentifier), // ✅ FIX #4: fallback на memory rate limiter
       'isAccountLocked',
     );
 
@@ -150,8 +248,8 @@ export class AuthService {
       const minutesLeft = secondsToMinutes(ttl);
       this.logger.warn(`Account locked: ${role} user (attempts exceeded)`);
       
-      // ✅ AUDIT: Логируем блокировку аккаунта
-      this.auditService.logLoginBlocked(login, role as UserRole, ip, userAgent, minutesLeft);
+      // ✅ AUDIT: Логируем блокировку аккаунта (await для важных событий безопасности)
+      await this.auditService.logLoginBlocked(login, role as UserRole, ip, userAgent, minutesLeft);
       
       throw new ForbiddenException(
         `Too many login attempts. Try again in ${minutesLeft} minute(s).`,
@@ -161,17 +259,22 @@ export class AuthService {
     const user = await this.validateUser(login, password, role);
 
     if (!user) {
-      // Записываем неудачную попытку (с graceful degradation)
+      // ✅ FIX #4: Записываем неудачную попытку с fallback на memory
       const attempts = await this.redis.safeExecute(
         () => this.redis.recordLoginAttempt(lockIdentifier),
-        0, // fallback: 0 попыток если Redis недоступен
+        () => {
+          // Fallback: используем in-memory rate limiter
+          this.incrementMemoryRateLimiter(lockIdentifier);
+          const record = this.memoryRateLimiter.get(lockIdentifier);
+          return record ? record.attempts : 1;
+        },
         'recordLoginAttempt',
       );
       const remainingAttempts = SecurityConfig.MAX_LOGIN_ATTEMPTS - attempts;
       
       this.logger.warn(`Failed login attempt for ${role} user (${attempts}/${SecurityConfig.MAX_LOGIN_ATTEMPTS} attempts)`);
       
-      // ✅ AUDIT: Логируем неудачную попытку входа
+      // ✅ FIX #12: Добавлен .catch() для обработки ошибок
       this.auditService.logLoginFailed(
         login, 
         role as UserRole, 
@@ -179,7 +282,7 @@ export class AuthService {
         userAgent, 
         'Invalid credentials',
         attempts,
-      );
+      ).catch(err => this.logger.error(`Audit log failed: ${err.message}`));
       
       if (remainingAttempts > 0 && attempts > 0) {
         throw new UnauthorizedException(
@@ -190,7 +293,6 @@ export class AuthService {
           `Too many failed login attempts. Account locked for ${SecurityConfig.LOGIN_LOCK_DURATION_SECONDS / SecurityConfig.SECONDS_PER_MINUTE} minutes.`,
         );
       } else {
-        // Redis недоступен - просто возвращаем базовую ошибку
         throw new UnauthorizedException('Invalid credentials.');
       }
     }
@@ -207,11 +309,11 @@ export class AuthService {
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: '7d', // 🔒 Захардкожено: Refresh token живёт 7 дней
+      expiresIn: SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL, // ✅ FIX: Используем константу (90d)
     });
 
     // ✅ ИСПРАВЛЕНИЕ #12: Redis Pipelining - сохраняем токен И сбрасываем attempts за 1 round trip
-    const refreshTTL = 7 * 24 * 60 * 60; // 🔒 Захардкожено: 7 дней в секундах
+    const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS; // ✅ FIX: Используем константу
     
     await this.redis.safeExecute(
       () => this.redis.saveRefreshTokenAndResetAttempts(
@@ -234,8 +336,9 @@ export class AuthService {
 
     this.logger.log(`Login successful for ${role} user`);
     
-    // ✅ AUDIT: Логируем успешный вход
-    this.auditService.logLoginSuccess(user.id, user.role, user.login, ip, userAgent);
+    // ✅ FIX #12: Добавлен .catch() для обработки ошибок в fire-and-forget
+    this.auditService.logLoginSuccess(user.id, user.role, user.login, ip, userAgent)
+      .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
 
     return {
       success: true,
@@ -267,9 +370,16 @@ export class AuthService {
     userAgent: string = 'Unknown'
   ): Promise<RefreshTokenResponse> {
     try {
+      // ✅ FIX: Явная проверка expiration с понятным сообщением
       const payload = this.jwtService.verify(refreshToken, {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
+        ignoreExpiration: false, // Явно указываем что проверяем expiration
       }) as JwtPayload;
+
+      // ✅ FIX: Дополнительная проверка exp claim
+      if (payload.exp && payload.exp * 1000 < Date.now()) {
+        throw new UnauthorizedException('Refresh token has expired. Please login again.');
+      }
 
       // Проверяем, существует ли токен в Redis
       const isValid = await this.redis.isRefreshTokenValid(
@@ -292,8 +402,8 @@ export class AuthService {
             `🚨 SECURITY ALERT: Refresh token reuse detected for user ${payload.sub} (${payload.role}). Revoking all user tokens!`,
           );
           
-          // ✅ AUDIT: Логируем критическое событие безопасности
-          this.auditService.logTokenReuse(payload.sub, payload.role, ip, userAgent);
+          // ✅ AUDIT: Логируем критическое событие безопасности (await для критических событий)
+          await this.auditService.logTokenReuse(payload.sub, payload.role, ip, userAgent);
 
           // Отзываем ВСЕ токены пользователя для безопасности
           await this.redis.revokeAllUserTokens(payload.sub, payload.role);
@@ -327,17 +437,18 @@ export class AuthService {
       const newAccessToken = this.jwtService.sign(newPayload);
       const newRefreshToken = this.jwtService.sign(newPayload, {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-        expiresIn: '7d', // 🔒 Захардкожено: Refresh token живёт 7 дней
+        expiresIn: SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL, // ✅ FIX: Используем константу (90d)
       });
 
       // Сохраняем новый refresh токен в Redis
-      const refreshTTL = 7 * 24 * 60 * 60; // 🔒 Захардкожено: 7 дней в секундах
+      const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS; // ✅ FIX: Используем константу
       await this.redis.saveRefreshToken(payload.sub, payload.role, newRefreshToken, refreshTTL);
 
       this.logger.log(`Token refreshed for ${payload.role} user`);
       
-      // ✅ AUDIT: Логируем обновление токена
-      this.auditService.logTokenRefresh(payload.sub, payload.role, ip, userAgent);
+      // ✅ FIX #12: Добавлен .catch() для обработки ошибок
+      this.auditService.logTokenRefresh(payload.sub, payload.role, ip, userAgent)
+        .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
 
       return {
         success: true,
@@ -356,9 +467,46 @@ export class AuthService {
   }
 
   /**
+   * ✅ FIX #11: Маппинг ролей на Prisma модели и поля для getProfile
+   * Устраняет дублирование кода в switch-case
+   */
+  private readonly profileConfig = {
+    [UserRole.ADMIN]: {
+      model: 'callcentreAdmin' as const,
+      select: {
+        id: true, login: true, note: true, createdAt: true, updatedAt: true,
+      },
+    },
+    [UserRole.OPERATOR]: {
+      model: 'callcentreOperator' as const,
+      select: {
+        id: true, name: true, login: true, city: true, status: true,
+        statusWork: true, dateCreate: true, note: true, sipAddress: true,
+        createdAt: true, updatedAt: true,
+      },
+    },
+    [UserRole.DIRECTOR]: {
+      model: 'director' as const,
+      select: {
+        id: true, name: true, login: true, cities: true, dateCreate: true,
+        note: true, tgId: true, createdAt: true, updatedAt: true,
+      },
+    },
+    [UserRole.MASTER]: {
+      model: 'master' as const,
+      select: {
+        id: true, name: true, login: true, cities: true, statusWork: true,
+        dateCreate: true, note: true, tgId: true, chatId: true,
+        createdAt: true, updatedAt: true,
+      },
+    },
+  };
+
+  /**
    * Получение профиля пользователя
    * ✅ Использует кеширование с константами из SecurityConfig
-   * ✅ Строгая типизация
+   * ✅ FIX #11: Рефакторинг через маппинг вместо switch-case
+   * ✅ FIX #6: Cache Stampede Protection через distributed lock
    * ✅ Логирует обращение к профилю
    */
   async getProfile(
@@ -371,122 +519,129 @@ export class AuthService {
     // ✅ ИСПРАВЛЕНИЕ #8: Кеширование профилей в Redis с константой TTL
     const cacheKey = `profile:${role}:${id}`;
 
-    // Пробуем получить из кеша
-    const cached = await this.redis.safeExecute(
-      async () => {
-        const value = await this.redis.get(cacheKey);
-        return value ? JSON.parse(value) : null;
-      },
-      null,
-      'getProfileFromCache',
+    // ✅ FIX: Оптимизированная операция - GET + SETNX за 1 round-trip
+    const lockKey = `lock:${cacheKey}`;
+    const LOCK_TTL = SecurityConfig.PROFILE_LOCK_TTL_SECONDS;
+    const MAX_WAIT_ATTEMPTS = SecurityConfig.PROFILE_LOCK_MAX_WAIT_ATTEMPTS;
+    const WAIT_INTERVAL_MS = SecurityConfig.PROFILE_LOCK_WAIT_INTERVAL_MS;
+    
+    // Пробуем получить из кеша И захватить lock атомарно
+    const { cached, lockAcquired: acquired } = await this.redis.safeExecute(
+      () => this.redis.getOrLock(cacheKey, lockKey, LOCK_TTL),
+      { cached: null, lockAcquired: true }, // fallback: продолжаем без кеша
+      'getOrLockProfile',
     );
 
     if (cached) {
       this.logger.debug(`Profile cache HIT for user ${id} (${role})`);
       
-      // ✅ AUDIT: Логируем доступ к профилю (cache hit)
-      this.auditService.logProfileAccess(id, role, ip, userAgent, true);
+      // ✅ FIX #12: Добавлен .catch() для обработки ошибок
+      this.auditService.logProfileAccess(id, role, ip, userAgent, true)
+        .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
       
       return {
         success: true,
-        data: cached as UserProfile,
+        data: JSON.parse(cached) as UserProfile,
       };
+    }
+    
+    if (!acquired) {
+      // Другой запрос уже загружает профиль - ждём и проверяем кеш
+      this.logger.debug(`Profile lock not acquired, waiting for cache fill for user ${id}`);
+      
+      for (let i = 0; i < MAX_WAIT_ATTEMPTS; i++) {
+        await new Promise(resolve => setTimeout(resolve, WAIT_INTERVAL_MS));
+        
+        const retryCache = await this.redis.safeExecute(
+          async () => {
+            const value = await this.redis.get(cacheKey);
+            return value ? JSON.parse(value) : null;
+          },
+          null,
+          'retryGetProfileFromCache',
+        );
+        
+        if (retryCache) {
+          this.logger.debug(`Profile cache filled by another request for user ${id}`);
+          
+          this.auditService.logProfileAccess(id, role, ip, userAgent, true)
+            .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
+          
+          return {
+            success: true,
+            data: retryCache as UserProfile,
+          };
+        }
+      }
+      
+      // Lock не освободился - продолжаем загрузку (fallback)
+      this.logger.warn(`Profile lock timeout, proceeding with DB query for user ${id}`);
     }
 
     // Кеш промах - загружаем из БД
     this.logger.debug(`Profile cache MISS for user ${id} (${role})`);
-    let profile: any = null;
-
-    switch (role) {
-      case UserRole.ADMIN:
-        profile = await this.prisma.callcentreAdmin.findUnique({
-          where: { id },
-          select: {
-            id: true,
-            login: true,
-            note: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-        break;
-
-      case UserRole.OPERATOR:
-        profile = await this.prisma.callcentreOperator.findUnique({
-          where: { id },
-          select: {
-            id: true,
-            name: true,
-            login: true,
-            city: true,
-            status: true,
-            statusWork: true,
-            dateCreate: true,
-            note: true,
-            sipAddress: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-        break;
-
-      case UserRole.DIRECTOR:
-        profile = await this.prisma.director.findUnique({
-          where: { id },
-          select: {
-            id: true,
-            name: true,
-            login: true,
-            cities: true,
-            dateCreate: true,
-            note: true,
-            tgId: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-        break;
-
-      case UserRole.MASTER:
-        profile = await this.prisma.master.findUnique({
-          where: { id },
-          select: {
-            id: true,
-            name: true,
-            login: true,
-            cities: true,
-            statusWork: true,
-            dateCreate: true,
-            note: true,
-            tgId: true,
-            chatId: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-        break;
-    }
-
-    if (!profile) {
-      throw new UnauthorizedException('User profile not found');
-    }
-
-    const result: UserProfile = { ...profile, role };
-
-    // Сохраняем в кеш (с graceful degradation)
-    await this.redis.safeExecute(
-      () => this.redis.set(cacheKey, JSON.stringify(result), SecurityConfig.PROFILE_CACHE_TTL),
-      undefined,
-      'saveProfileToCache',
-    );
     
-    // ✅ AUDIT: Логируем доступ к профилю (cache miss)
-    this.auditService.logProfileAccess(id, role, ip, userAgent, false);
+    try {
+      // ✅ FIX #11: Используем маппинг вместо switch-case
+      const config = this.profileConfig[role];
+      if (!config) {
+        throw new UnauthorizedException('Invalid user role');
+      }
 
-    return {
-      success: true,
-      data: result,
-    };
+      // ✅ Double-check кеша после получения lock
+      const doubleCheckCache = await this.redis.safeExecute(
+        async () => {
+          const value = await this.redis.get(cacheKey);
+          return value ? JSON.parse(value) : null;
+        },
+        null,
+        'doubleCheckProfileCache',
+      );
+      
+      if (doubleCheckCache) {
+        this.logger.debug(`Profile cache filled during lock acquisition for user ${id}`);
+        return {
+          success: true,
+          data: doubleCheckCache as UserProfile,
+        };
+      }
+
+      const profile = await (this.prisma[config.model] as any).findUnique({
+        where: { id },
+        select: config.select,
+      });
+
+      if (!profile) {
+        throw new UnauthorizedException('User profile not found');
+      }
+
+      const result: UserProfile = { ...profile, role };
+
+      // Сохраняем в кеш (с graceful degradation)
+      await this.redis.safeExecute(
+        () => this.redis.set(cacheKey, JSON.stringify(result), SecurityConfig.PROFILE_CACHE_TTL),
+        undefined,
+        'saveProfileToCache',
+      );
+      
+      // ✅ FIX #12: Добавлен .catch() для обработки ошибок
+      this.auditService.logProfileAccess(id, role, ip, userAgent, false)
+        .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
+
+      return {
+        success: true,
+        data: result,
+      };
+    } finally {
+      // ✅ FIX #6: Освобождаем lock
+      if (acquired) {
+        await this.redis.safeExecute(
+          () => this.redis.del(lockKey),
+          undefined,
+          'releaseProfileLock',
+        );
+      }
+    }
   }
 
   /**
@@ -502,8 +657,9 @@ export class AuthService {
     await this.redis.revokeAllUserTokens(userId, role);
     this.logger.log(`User logged out: ${role} user`);
     
-    // ✅ AUDIT: Логируем выход из системы
-    this.auditService.logLogout(userId, role, ip, userAgent);
+    // ✅ FIX #12: Добавлен .catch() для обработки ошибок
+    this.auditService.logLogout(userId, role, ip, userAgent)
+      .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
   }
 
   /**
@@ -511,7 +667,7 @@ export class AuthService {
    * ✅ Удаляет все refresh токены
    * ✅ Устанавливает флаг force_logout для мгновенной блокировки access токенов
    * @param userId ID пользователя для деавторизации
-   * @param role Роль пользователя
+   * @param role Роль пользователя (валидируется через UserRole enum)
    * @param adminId ID администратора, выполняющего действие
    * @param adminRole Роль администратора
    * @param ip IP адрес администратора
@@ -519,23 +675,24 @@ export class AuthService {
    */
   async forceLogout(
     userId: number,
-    role: string,
+    role: UserRole,  // ✅ FIX: Используем enum вместо string
     adminId: number,
-    adminRole: string,
+    adminRole: UserRole,  // ✅ FIX: Используем enum вместо string
     ip: string = '0.0.0.0',
     userAgent: string = 'Unknown',
   ): Promise<void> {
     // 1. Удаляем все refresh токены
     await this.redis.revokeAllUserTokens(userId, role);
     
-    // 2. Устанавливаем флаг принудительной деавторизации (действует 15 минут - как TTL access token)
-    await this.redis.forceLogoutUser(userId, role, 15 * 60);
+    // 2. Устанавливаем флаг принудительной деавторизации (действует как TTL access token)
+    await this.redis.forceLogoutUser(userId, role, SecurityConfig.FORCE_LOGOUT_TTL_SECONDS);
     
     this.logger.warn(
       `🔒 Force logout: ${role} user #${userId} by admin #${adminId} (${adminRole})`,
     );
     
-    // ✅ AUDIT: Логируем принудительную деавторизацию
-    this.auditService.logForceLogout(userId, role, adminId, adminRole, ip, userAgent);
+    // ✅ FIX #12: Добавлен .catch() для обработки ошибок
+    this.auditService.logForceLogout(userId, role, adminId, adminRole, ip, userAgent)
+      .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
   }
 }

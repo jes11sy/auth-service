@@ -56,9 +56,40 @@ function validateJwtSecrets(): void {
   logger.log('✅ JWT secrets validation passed');
 }
 
+/**
+ * ✅ FIX: Валидация COOKIE_SECRET
+ * Cookie секрет должен быть установлен отдельно от JWT секретов
+ */
+function validateCookieSecret(): void {
+  const cookieSecret = process.env.COOKIE_SECRET;
+  const jwtSecret = process.env.JWT_SECRET;
+  const logger = new Logger('SecurityValidation');
+
+  if (!cookieSecret || cookieSecret.trim().length === 0) {
+    logger.warn('⚠️ COOKIE_SECRET not set. Using JWT_SECRET as fallback (not recommended for production)');
+    
+    if (process.env.NODE_ENV === 'production') {
+      logger.error('❌ COOKIE_SECRET is required in production!');
+      throw new Error('SECURITY ERROR: COOKIE_SECRET must be configured in production');
+    }
+  } else if (cookieSecret === jwtSecret) {
+    logger.warn('⚠️ COOKIE_SECRET is identical to JWT_SECRET. Consider using different values.');
+  } else {
+    logger.log('✅ COOKIE_SECRET validation passed');
+  }
+}
+
 async function bootstrap() {
   // ✅ Валидация секретов ПЕРЕД запуском приложения
   validateJwtSecrets();
+  validateCookieSecret();
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  // ✅ FIX #86: Фильтрация уровней логов в production
+  const logLevels: ('log' | 'error' | 'warn' | 'debug' | 'verbose')[] = isProduction
+    ? ['log', 'error', 'warn']
+    : ['log', 'error', 'warn', 'debug', 'verbose'];
 
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
@@ -67,10 +98,13 @@ async function bootstrap() {
       trustProxy: true,
       bodyLimit: 102400, // ✅ ИСПРАВЛЕНИЕ #11: 100KB вместо 10MB (auth сервис принимает только маленькие JSON)
     }),
+    {
+      logger: logLevels, // ✅ FIX #86: Применяем фильтрацию логов
+    },
   );
 
   const logger = new Logger('AuthService');
-  const isDevelopment = process.env.NODE_ENV !== 'production';
+  const isDevelopment = !isProduction;
 
   // ✅ Cookie Plugin (для httpOnly cookies)
   await app.register(require('@fastify/cookie'), {

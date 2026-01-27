@@ -6,7 +6,6 @@ import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { LocalStrategy } from './strategies/local.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { ProactiveRefreshInterceptor } from './interceptors/proactive-refresh.interceptor';
 import { AuditModule } from '../audit/audit.module';
@@ -22,7 +21,8 @@ import { RedisModule } from '../redis/redis.module';
       useFactory: async (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET'),
         signOptions: {
-          expiresIn: '15m', // 🔒 Захардкожено: Access token живёт 15 минут
+          // ✅ FIX #36: Используем JWT_EXPIRATION из .env вместо hardcoded '15m'
+          expiresIn: configService.get<string>('JWT_EXPIRATION') || '15m',
         },
       }),
     }),
@@ -34,7 +34,6 @@ import { RedisModule } from '../redis/redis.module';
   providers: [
     AuthService,
     JwtStrategy,
-    LocalStrategy,
     JwtAuthGuard,
     ProactiveRefreshInterceptor,
     {

@@ -80,13 +80,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         
         // Детальное логирование медленных запросов
         if (duration > SLOW_QUERY_THRESHOLD) {
+          // ✅ FIX: Фильтруем чувствительные данные из логов
+          const sanitizedArgs = this.sanitizeArgs(params.args);
           this.logger.error(
             `🐌 SLOW QUERY DETECTED: ${params.model}.${params.action} took ${duration}ms`,
             JSON.stringify({
               model: params.model,
               action: params.action,
               duration,
-              args: params.args,
+              args: sanitizedArgs,
               timestamp: new Date().toISOString(),
             }, null, 2)
           );
@@ -121,6 +123,39 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   async onModuleDestroy() {
     await this.$disconnect();
     this.logger.log('Database disconnected');
+  }
+
+  /**
+   * ✅ FIX: Фильтрация чувствительных данных из аргументов запроса
+   * Предотвращает логирование паролей и других sensitive полей
+   */
+  private sanitizeArgs(args: any): any {
+    if (!args || typeof args !== 'object') {
+      return args;
+    }
+
+    const sensitiveFields = ['password', 'token', 'secret', 'refreshToken', 'accessToken'];
+    const sanitized = { ...args };
+
+    const sanitizeObject = (obj: any): any => {
+      if (!obj || typeof obj !== 'object') return obj;
+      
+      const result: any = Array.isArray(obj) ? [] : {};
+      
+      for (const key of Object.keys(obj)) {
+        if (sensitiveFields.some(field => key.toLowerCase().includes(field.toLowerCase()))) {
+          result[key] = '[REDACTED]';
+        } else if (typeof obj[key] === 'object') {
+          result[key] = sanitizeObject(obj[key]);
+        } else {
+          result[key] = obj[key];
+        }
+      }
+      
+      return result;
+    };
+
+    return sanitizeObject(sanitized);
   }
 }
 

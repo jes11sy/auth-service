@@ -2,20 +2,38 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// ✅ FIX: Connection pooling рекомендации
+// В production DATABASE_URL должен содержать параметры пула:
+// postgresql://user:pass@host:5432/db?connection_limit=20&pool_timeout=30
+// 
+// Рекомендуемые параметры:
+// - connection_limit: количество соединений (CPU cores * 2 + 1)
+// - pool_timeout: таймаут ожидания соединения (30 сек)
+// - connect_timeout: таймаут подключения (10 сек)
+// - socket_timeout: таймаут сокета (30 сек)
+//
+// Для Prisma Accelerate (managed pooling):
+// - Используйте directUrl для миграций
+// - Основной url через Accelerate endpoint
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  // ✅ Для использования Prisma Accelerate раскомментируйте:
+  // directUrl = env("DIRECT_DATABASE_URL")
 }
 
 // Существующие таблицы аутентификации
+// ✅ FIX #148: Пароли хранятся в виде bcrypt хэша (12 раундов)
+// Хэширование выполняется в auth.service.ts перед сохранением
 model CallcentreAdmin {
   id        Int      @id @default(autoincrement())
   login     String   @unique
-  password  String
+  password  String   /// @encrypted bcrypt hash, 12 rounds
   note      String?
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  // ✅ FIX #167: REMOVED @@index([login]) — @unique уже создаёт индекс автоматически
   @@map("callcentre_admin")
 }
 
@@ -23,7 +41,7 @@ model CallcentreOperator {
   id         Int      @id @default(autoincrement())
   name       String
   login      String   @unique
-  password   String
+  password   String   /// @encrypted bcrypt hash, 12 rounds
   city       String
   status     String
   statusWork String   @map("status_work")
@@ -48,7 +66,7 @@ model Director {
   cities      String[] // Массив городов
   name        String
   login       String   @unique
-  password    String
+  password    String   /// @encrypted bcrypt hash, 12 rounds
   contractDoc String?  @map("contract_doc")
   passportDoc String?  @map("passport_doc")
   dateCreate  DateTime @default(now()) @map("date_create")
@@ -57,6 +75,7 @@ model Director {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
+  // ✅ FIX #167: REMOVED @@index([login]) — @unique уже создаёт индекс автоматически
   @@map("director")
 }
 
@@ -65,7 +84,7 @@ model Master {
   cities      String[] // Массив городов
   name        String
   login       String?  @unique
-  password    String?
+  password    String?  /// @encrypted bcrypt hash, 12 rounds (nullable for masters without login)
   passportDoc String?  @map("passport_doc")
   contractDoc String?  @map("contract_doc")
   statusWork  String   @map("status_work")
@@ -76,8 +95,8 @@ model Master {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  // ✅ ИСПРАВЛЕНИЕ PERF-002: Performance Indexes
-  @@index([statusWork])          // Для проверки статуса работы при login
+  // ✅ FIX #167: Оптимизированные индексы
+  // REMOVED: @@index([statusWork]) — дубликат, покрыт [statusWork, login]
   @@index([statusWork, login])   // Составной индекс для login query с проверкой statusWork
   @@map("master")
 }

@@ -1,6 +1,7 @@
 import { Injectable, ExecutionContext, UnauthorizedException, Inject, Logger } from '@nestjs/common';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { CookieConfig, getCookieName } from '../../../config/cookie.config';
+import { SecurityConfig } from '../../../config/security.config';
 import { RedisService } from '../../redis/redis.service';
 
 /**
@@ -13,6 +14,7 @@ import { RedisService } from '../../redis/redis.service';
  * 
  * ✅ Проверяет флаг принудительной деавторизации (force_logout)
  * ✅ Проактивное обновление токена если осталось меньше 5 минут до истечения
+ * ✅ FIX: Race condition исправлен - force logout проверяется в canActivate
  */
 @Injectable()
 export class CookieJwtAuthGuard extends JwtAuthGuard {
@@ -51,13 +53,15 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
     const now = Date.now();
     const timeLeft = expiresAt - now;
     
-    // Обновляем если осталось меньше 5 минут (300 секунд)
-    const REFRESH_THRESHOLD = 5 * 60 * 1000;
-    
-    return timeLeft > 0 && timeLeft < REFRESH_THRESHOLD;
+    // ✅ FIX: Используем константу из SecurityConfig
+    return timeLeft > 0 && timeLeft < SecurityConfig.PROACTIVE_REFRESH_THRESHOLD_MS;
   }
   
-  canActivate(context: ExecutionContext) {
+  /**
+   * ✅ FIX: Переопределяем canActivate как async для корректной проверки force logout
+   * Это устраняет race condition - вся async логика теперь в одном месте
+   */
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     
     // В NestJS + Fastify cookies находятся в request.cookies
@@ -105,14 +109,26 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
     }
     
     // Вызываем родительский guard для валидации токена
-    return super.canActivate(context);
+    const isValid = await super.canActivate(context);
+    if (!isValid) {
+      return false;
+    }
+    
+    // ✅ FIX: Force logout проверка теперь здесь (после успешной JWT валидации)
+    // Это гарантирует что request.user уже установлен и мы можем безопасно await
+    const user = request.user;
+    if (user?.sub && user?.role) {
+      await this.checkForceLogout(user);
+    }
+    
+    return true;
   }
   
   /**
    * Обработка ошибок с понятными сообщениями
-   * ✅ Проверяет флаг принудительной деавторизации
+   * ✅ FIX: Теперь синхронный метод - force logout проверяется в canActivate
    */
-  async handleRequest(err: any, user: any, info: any) {
+  handleRequest(err: any, user: any, info: any): any {
     if (err || !user) {
       if (info?.name === 'TokenExpiredError') {
         throw new UnauthorizedException('Access token has expired. Please refresh your token.');
@@ -123,25 +139,28 @@ export class CookieJwtAuthGuard extends JwtAuthGuard {
       throw err || new UnauthorizedException('Authentication required.');
     }
 
-    // ✅ FORCE LOGOUT CHECK: Проверяем флаг принудительной деавторизации
-    if (user.sub && user.role) {
-      try {
-        const isForcedLogout = await this.redis.isUserForcedLogout(user.sub, user.role);
-        if (isForcedLogout) {
-          throw new UnauthorizedException('Session terminated by administrator. Please login again.');
-        }
-      } catch (error) {
-        // Graceful degradation: если Redis недоступен, пропускаем проверку
-        // Не блокируем пользователя если инфраструктура временно недоступна
-        if (error instanceof UnauthorizedException) {
-          throw error;
-        }
-        // Логируем ошибку, но продолжаем работу
-        console.warn('Force logout check failed (Redis unavailable):', error.message);
-      }
-    }
-
+    // ✅ FIX: Просто возвращаем user - force logout проверяется в canActivate
     return user;
+  }
+
+  /**
+   * ✅ Проверка force logout флага в Redis
+   * Выбрасывает UnauthorizedException если пользователь принудительно разлогинен
+   */
+  private async checkForceLogout(user: any): Promise<void> {
+    try {
+      const isForcedLogout = await this.redis.isUserForcedLogout(user.sub, user.role);
+      if (isForcedLogout) {
+        throw new UnauthorizedException('Session terminated by administrator. Please login again.');
+      }
+    } catch (error) {
+      // Graceful degradation: если Redis недоступен, пропускаем проверку
+      // Не блокируем пользователя если инфраструктура временно недоступна
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.warn(`Force logout check failed (Redis unavailable): ${error.message}`);
+    }
   }
 }
 

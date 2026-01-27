@@ -3,16 +3,23 @@
  * Используется для безопасного хранения JWT токенов на стороне клиента
  */
 
+// ✅ FIX: Вычисляем secure и sameSite корректно
+// sameSite: 'none' ТРЕБУЕТ secure: true (даже в dev через localhost с HTTPS)
+const isProduction = process.env.NODE_ENV === 'production';
+const useSecureCookies = isProduction || process.env.COOKIE_SECURE === 'true';
+
 export const CookieConfig = {
   // Имена cookies (префикс для избежания конфликтов)
   ACCESS_TOKEN_NAME: 'access_token',    // Обычное имя для cross-domain работы
   REFRESH_TOKEN_NAME: 'refresh_token',  // Обычное имя для cross-domain работы
   
   // Базовые настройки cookies
+  // ✅ FIX #3: sameSite: 'lax' для защиты от CSRF
+  // 'lax' защищает от CSRF атак и работает между поддоменами (lead-schem.ru → api.lead-schem.ru)
   COOKIE_OPTIONS: {
     httpOnly: true,                           // ✅ Защита от XSS - недоступен из JavaScript
-    secure: process.env.NODE_ENV === 'production', // ✅ HTTPS только в production
-    sameSite: 'none' as const,                // ✅ 'none' для cross-origin работы
+    secure: useSecureCookies,                 // ✅ HTTPS в production или явно включено
+    sameSite: 'lax' as const,                 // ✅ FIX #3: 'lax' для CSRF защиты (работает с поддоменами)
     path: '/',                                // Доступен на всех путях
     // domain устанавливается динамически в getCookieOptions()
   },
@@ -54,13 +61,19 @@ export function shouldUseCookies(headers: Record<string, any>): boolean {
 /**
  * Получает настройки cookie с динамическим domain на основе origin запроса
  * Это изолирует куки между разными фронтендами (core.lead-schem.ru, new.lead-schem.ru и т.д.)
+ * ✅ FIX #5: Используем явное присваивание вместо delete для избежания мутации
  */
 export function getCookieOptions(origin?: string, maxAge?: number): CookieOptions {
+  // ✅ FIX: Создаём новый объект без domain по умолчанию
   const options: CookieOptions = {
-    ...CookieConfig.COOKIE_OPTIONS,
+    httpOnly: CookieConfig.COOKIE_OPTIONS.httpOnly,
+    secure: CookieConfig.COOKIE_OPTIONS.secure,
+    sameSite: CookieConfig.COOKIE_OPTIONS.sameSite,
+    path: CookieConfig.COOKIE_OPTIONS.path,
+    // domain не копируется - будет установлен явно если нужно
   };
   
-  if (maxAge) {
+  if (maxAge !== undefined) {
     options.maxAge = maxAge;
   }
   
@@ -70,27 +83,14 @@ export function getCookieOptions(origin?: string, maxAge?: number): CookieOption
       const url = new URL(origin);
       const hostname = url.hostname;
       
-      // Если это поддомен lead-schem.ru, используем конкретный поддомен
-      if (hostname.endsWith('.lead-schem.ru')) {
-        // Для core.lead-schem.ru → domain: .lead-schem.ru (чтобы api.lead-schem.ru тоже получал)
-        // Но с префиксом origin для изоляции
+      // Если это поддомен lead-schem.ru, используем корневой домен
+      if (hostname.endsWith('.lead-schem.ru') || hostname === 'lead-schem.ru') {
         options.domain = '.lead-schem.ru';
-      } else if (hostname === 'lead-schem.ru') {
-        options.domain = '.lead-schem.ru';
-      } else if (hostname === 'localhost' || hostname.startsWith('localhost:')) {
-        // Для localhost не устанавливаем domain
-        delete options.domain;
-      } else {
-        // Для других доменов не устанавливаем domain (куки только для этого домена)
-        delete options.domain;
       }
-    } catch (err) {
-      // Если origin некорректный, не устанавливаем domain
-      delete options.domain;
+      // Для localhost и других доменов domain остаётся undefined (куки только для текущего домена)
+    } catch {
+      // Если origin некорректный, domain остаётся undefined
     }
-  } else {
-    // Если origin не передан, не устанавливаем domain
-    delete options.domain;
   }
   
   return options;

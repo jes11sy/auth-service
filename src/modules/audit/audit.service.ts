@@ -62,6 +62,7 @@ export class AuditService {
    * Базовый метод логирования событий аудита
    * ✅ Теперь пишет в БД + консоль
    * ✅ Throttling для profile.access и token.refresh (макс раз в 5 минут)
+   * ✅ FIX #9: Оптимизирован через SETNX (1 round-trip вместо 2)
    */
   async log(entry: AuditLogEntry): Promise<void> {
     const timestamp = entry.timestamp || new Date().toISOString();
@@ -74,15 +75,15 @@ export class AuditService {
     
     if (throttleEvents.includes(entry.eventType as AuditEventType) && entry.userId) {
       const throttleKey = `audit:throttle:${entry.userId}:${entry.eventType}`;
-      const exists = await this.redis.get(throttleKey);
       
-      if (exists) {
-        // Уже логировали это событие для этого юзера в последние 5 минут - пропускаем
+      // ✅ FIX #9: Используем setNX для атомарной проверки и установки (1 round-trip)
+      const wasSet = await this.redis.setNX(throttleKey, '1', 300);
+      
+      if (!wasSet) {
+        // Ключ уже существовал - пропускаем логирование
         return;
       }
-      
-      // Устанавливаем флаг на 5 минут (300 секунд)
-      await this.redis.set(throttleKey, '1', 300);
+      // Ключ установлен - продолжаем логирование
     }
     
     // 1. JSON формат для парсинга в SIEM системах (консоль)
@@ -91,25 +92,24 @@ export class AuditService {
       timestamp,
     }));
 
-    // 2. ✅ Сохраняем в БД для долгосрочного хранения
-    try {
-      await this.prisma.auditLog.create({
-        data: {
-          timestamp: new Date(timestamp),
-          eventType: entry.eventType,
-          userId: entry.userId,
-          role: entry.role,
-          login: entry.login,
-          ip: entry.ip,
-          userAgent: entry.userAgent,
-          success: entry.success,
-          metadata: entry.metadata || {},
-        },
-      });
-    } catch (error) {
+    // 2. ✅ FIX #9: Fire-and-forget запись в БД - не блокируем основной запрос
+    // Критические события (LOGIN_BLOCKED, TOKEN_REUSE) логируются с await в вызывающем коде
+    this.prisma.auditLog.create({
+      data: {
+        timestamp: new Date(timestamp),
+        eventType: entry.eventType,
+        userId: entry.userId,
+        role: entry.role,
+        login: entry.login,
+        ip: entry.ip,
+        userAgent: entry.userAgent,
+        success: entry.success,
+        metadata: entry.metadata || {},
+      },
+    }).catch(error => {
       // Если БД недоступна - логируем ошибку, но не падаем
       this.logger.error(`Failed to save audit log to DB: ${error.message}`);
-    }
+    });
 
     // TODO: Опционально - отправка в внешние системы:
     // - await this.elasticsearchService.index({ index: 'audit-logs', body: entry });
@@ -263,9 +263,9 @@ export class AuditService {
    */
   async logForceLogout(
     userId: number,
-    role: string,
+    role: UserRole,       // ✅ FIX: Используем enum
     adminId: number,
-    adminRole: string,
+    adminRole: UserRole,  // ✅ FIX: Используем enum
     ip: string,
     userAgent: string,
   ): Promise<void> {
@@ -273,7 +273,7 @@ export class AuditService {
       timestamp: new Date().toISOString(),
       eventType: AuditEventType.FORCE_LOGOUT,
       userId,
-      role: role as UserRole,
+      role,
       ip,
       userAgent,
       success: true,
