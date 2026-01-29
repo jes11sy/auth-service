@@ -135,13 +135,14 @@ export class AuthController {
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
-      // Не отправляем токены в response body (они в cookies)
+      // ✅ Возвращаем refresh token в body для сохранения в IndexedDB (backup для iOS PWA)
+      // Access token не возвращаем — он короткоживущий и нет смысла хранить
       return {
         success: true,
         message: 'Login successful',
         data: {
           user: result.data.user,
-          // accessToken и refreshToken НЕ включаем
+          refreshToken: result.data.refreshToken, // Для IndexedDB backup
         },
       };
     }
@@ -219,9 +220,12 @@ export class AuthController {
         signed: CookieConfig.ENABLE_COOKIE_SIGNING,
       });
       
+      // ✅ Возвращаем refresh token в body для обновления в IndexedDB (backup для iOS PWA)
       return {
         success: true,
-        data: {}, // Токены в cookies, не отправляем в body
+        data: {
+          refreshToken: result.data.refreshToken, // Для IndexedDB backup
+        },
       };
     }
     
