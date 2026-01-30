@@ -145,6 +145,7 @@ async function bootstrap() {
   await app.register(require('@fastify/helmet'), {
     contentSecurityPolicy: isDevelopment ? false : undefined,
     crossOriginEmbedderPolicy: false,
+    frameguard: { action: 'deny' }, // X-Frame-Options: DENY
   });
 
   // ✅ ИСПРАВЛЕНИЕ: Настройка Response Compression с оптимальными параметрами
