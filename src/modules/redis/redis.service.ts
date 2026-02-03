@@ -579,6 +579,62 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // ==================== IDEMPOTENT TOKEN REFRESH ====================
+
+  /**
+   * ✅ FIX: Сохранить результат refresh для idempotent повторных запросов
+   * Позволяет избежать ложных срабатываний token reuse detection
+   * при параллельных запросах refresh с одним и тем же токеном
+   * 
+   * @param oldTokenHash Hash старого токена (используем hash для экономии памяти)
+   * @param newAccessToken Новый access token
+   * @param newRefreshToken Новый refresh token
+   * @param gracePeriodSeconds TTL кеша (по умолчанию 60 секунд)
+   */
+  async cacheRefreshResult(
+    oldTokenHash: string,
+    newAccessToken: string,
+    newRefreshToken: string,
+    gracePeriodSeconds: number = 60,
+  ): Promise<void> {
+    const cacheKey = `refresh_cache:${oldTokenHash}`;
+    const cacheValue = JSON.stringify({ accessToken: newAccessToken, refreshToken: newRefreshToken });
+    
+    await this.client.setex(cacheKey, gracePeriodSeconds, cacheValue);
+    
+    this.logger.debug(`Refresh result cached for ${gracePeriodSeconds}s (idempotent protection)`);
+  }
+
+  /**
+   * ✅ FIX: Получить закешированный результат refresh
+   * Если найден - возвращаем те же токены что были сгенерированы ранее
+   * 
+   * @param oldTokenHash Hash старого токена
+   * @returns Закешированные токены или null
+   */
+  async getCachedRefreshResult(
+    oldTokenHash: string,
+  ): Promise<{ accessToken: string; refreshToken: string } | null> {
+    const cacheKey = `refresh_cache:${oldTokenHash}`;
+    const cached = await this.client.get(cacheKey);
+    
+    if (cached) {
+      this.logger.debug(`Refresh cache HIT - returning cached tokens (idempotent)`);
+      return JSON.parse(cached);
+    }
+    
+    return null;
+  }
+
+  /**
+   * ✅ FIX: Создать hash токена для использования как ключ кеша
+   * Используем первые 32 символа SHA256 для экономии памяти
+   */
+  hashToken(token: string): string {
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(token).digest('hex').substring(0, 32);
+  }
+
   // ==================== GRACEFUL DEGRADATION ====================
 
   /**

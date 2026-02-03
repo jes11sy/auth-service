@@ -63,6 +63,11 @@ export const SecurityConfig = {
   MAX_PASSWORD_LENGTH: 128, // Максимальная длина пароля
   MIN_LOGIN_LENGTH: 2,      // Минимальная длина логина
   MAX_LOGIN_LENGTH: 50,     // Максимальная длина логина
+  
+  // ✅ FIX: Idempotent Token Refresh - защита от ложных срабатываний token reuse
+  // Если тот же refresh token приходит повторно в течение grace period,
+  // возвращаем закешированные новые токены вместо "token reuse alert"
+  REFRESH_GRACE_PERIOD_SECONDS: 60,  // 60 секунд grace period для параллельных запросов
 } as const;
 
 /**

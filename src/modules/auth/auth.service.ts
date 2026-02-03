@@ -363,6 +363,7 @@ export class AuthService implements OnModuleInit {
    * ✅ Детектирует token reuse attack
    * ✅ Использует константы из SecurityConfig
    * ✅ Логирует все события через AuditService
+   * ✅ FIX: Idempotent refresh - защита от ложных срабатываний при параллельных запросах
    */
   async refreshToken(
     refreshToken: string, 
@@ -381,6 +382,24 @@ export class AuthService implements OnModuleInit {
         throw new UnauthorizedException('Refresh token has expired. Please login again.');
       }
 
+      // ✅ FIX: Idempotent Refresh - проверяем кеш ПЕРЕД всеми проверками
+      // Если этот токен уже был успешно обновлён в течение grace period,
+      // возвращаем закешированные новые токены (защита от race condition)
+      const tokenHash = this.redis.hashToken(refreshToken);
+      const cachedResult = await this.redis.safeExecute(
+        () => this.redis.getCachedRefreshResult(tokenHash),
+        null,
+        'getCachedRefreshResult',
+      );
+
+      if (cachedResult) {
+        this.logger.log(`Idempotent refresh: returning cached tokens for ${payload.role} user`);
+        return {
+          success: true,
+          data: cachedResult,
+        };
+      }
+
       // Проверяем, существует ли токен в Redis
       const isValid = await this.redis.isRefreshTokenValid(
         payload.sub,
@@ -397,7 +416,23 @@ export class AuthService implements OnModuleInit {
         );
 
         if (wasRecentlyRevoked) {
+          // ✅ FIX: Ещё раз проверяем кеш - возможно параллельный запрос уже обработался
+          const cachedAfterRevoke = await this.redis.safeExecute(
+            () => this.redis.getCachedRefreshResult(tokenHash),
+            null,
+            'getCachedRefreshResultAfterRevoke',
+          );
+
+          if (cachedAfterRevoke) {
+            this.logger.log(`Idempotent refresh (after revoke check): returning cached tokens for ${payload.role} user`);
+            return {
+              success: true,
+              data: cachedAfterRevoke,
+            };
+          }
+
           // SECURITY ALERT: Token reuse detected! Возможная кража токена
+          // Но только если прошло больше REFRESH_GRACE_PERIOD_SECONDS
           this.logger.error(
             `🚨 SECURITY ALERT: Refresh token reuse detected for user ${payload.sub} (${payload.role}). Revoking all user tokens!`,
           );
@@ -443,6 +478,18 @@ export class AuthService implements OnModuleInit {
       // Сохраняем новый refresh токен в Redis
       const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS; // ✅ FIX: Используем константу
       await this.redis.saveRefreshToken(payload.sub, payload.role, newRefreshToken, refreshTTL);
+
+      // ✅ FIX: Кешируем результат refresh для idempotent повторных запросов
+      await this.redis.safeExecute(
+        () => this.redis.cacheRefreshResult(
+          tokenHash,
+          newAccessToken,
+          newRefreshToken,
+          SecurityConfig.REFRESH_GRACE_PERIOD_SECONDS,
+        ),
+        undefined,
+        'cacheRefreshResult',
+      );
 
       this.logger.log(`Token refreshed for ${payload.role} user`);
       
