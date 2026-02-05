@@ -87,6 +87,10 @@ export function getCookieOptions(origin?: string, maxAge?: number): CookieOption
       if (hostname.endsWith('.lead-schem.ru') || hostname === 'lead-schem.ru') {
         options.domain = '.lead-schem.ru';
       }
+      // Если это поддомен test-shem.ru, используем корневой домен
+      else if (hostname.endsWith('.test-shem.ru') || hostname === 'test-shem.ru') {
+        options.domain = '.test-shem.ru';
+      }
       // Для localhost и других доменов domain остаётся undefined (куки только для текущего домена)
     } catch {
       // Если origin некорректный, domain остаётся undefined
