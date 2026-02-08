@@ -599,13 +599,6 @@ export class AuthService implements OnModuleInit {
         refreshToken: newRefreshToken,
       },
     };
-    } catch (error) {
-      if (error instanceof UnauthorizedException) {
-        throw error;
-      }
-      this.logger.error('Token refresh error:', error.message);
-      throw new UnauthorizedException('Invalid or expired refresh token');
-    }
   }
 
   /**
