@@ -327,19 +327,27 @@ export class AuthService implements OnModuleInit {
       expiresIn: SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL, // ✅ FIX: Используем константу (90d)
     });
 
-    // ✅ ИСПРАВЛЕНИЕ #12: Redis Pipelining - сохраняем токен И сбрасываем attempts за 1 round trip
-    const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS; // ✅ FIX: Используем константу
+    // ✅ FIX: Сохраняем refresh токен ПО SESSION ID (новая архитектура)
+    // Это решает проблему token reuse при входе с нескольких устройств
+    const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS;
     
     await this.redis.safeExecute(
-      () => this.redis.saveRefreshTokenAndResetAttempts(
+      () => this.redis.saveRefreshTokenBySession(
         user.id,
         user.role,
+        sessionId,
         refreshToken,
         refreshTTL,
-        lockIdentifier,
       ),
       undefined,
-      'saveRefreshTokenAndResetAttempts',
+      'saveRefreshTokenBySession',
+    );
+
+    // Сбрасываем счётчик попыток входа
+    await this.redis.safeExecute(
+      () => this.redis.resetLoginAttempts(lockIdentifier),
+      undefined,
+      'resetLoginAttempts',
     );
 
     // ✅ Очищаем флаг принудительной деавторизации при новом логине
@@ -375,10 +383,13 @@ export class AuthService implements OnModuleInit {
 
   /**
    * Обновление access токена по refresh токену
-   * ✅ Детектирует token reuse attack
-   * ✅ Использует константы из SecurityConfig
-   * ✅ Логирует все события через AuditService
-   * ✅ FIX: Idempotent refresh - защита от ложных срабатываний при параллельных запросах
+   * ✅ НОВАЯ АРХИТЕКТУРА: Session-based refresh (решает token reuse при multi-device)
+   * 
+   * Логика:
+   * 1. Если есть sessionId (sid) в токене — используем session-based проверку
+   * 2. Если нет sessionId — fallback на legacy проверку (для старых токенов)
+   * 3. При session-based refresh просто обновляем токен для этой сессии
+   *    (никакого token reuse detection не нужно!)
    */
   async refreshToken(
     refreshToken: string, 
@@ -386,140 +397,208 @@ export class AuthService implements OnModuleInit {
     userAgent: string = 'Unknown'
   ): Promise<RefreshTokenResponse> {
     try {
-      // ✅ FIX: Явная проверка expiration с понятным сообщением
+      // Верифицируем токен
       const payload = this.jwtService.verify(refreshToken, {
         secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-        ignoreExpiration: false, // Явно указываем что проверяем expiration
+        ignoreExpiration: false,
       }) as JwtPayload;
 
-      // ✅ FIX: Дополнительная проверка exp claim
+      // Проверка expiration
       if (payload.exp && payload.exp * 1000 < Date.now()) {
         throw new UnauthorizedException('Refresh token has expired. Please login again.');
       }
 
-      // ✅ FIX: Idempotent Refresh - проверяем кеш ПЕРЕД всеми проверками
-      // Если этот токен уже был успешно обновлён в течение grace period,
-      // возвращаем закешированные новые токены (защита от race condition)
-      const tokenHash = this.redis.hashToken(refreshToken);
-      const cachedResult = await this.redis.safeExecute(
-        () => this.redis.getCachedRefreshResult(tokenHash),
-        null,
-        'getCachedRefreshResult',
-      );
+      const sessionId = payload.sid;
 
-      if (cachedResult) {
-        this.logger.log(`Idempotent refresh: returning cached tokens for ${payload.role} user`);
-        return {
-          success: true,
-          data: cachedResult,
-        };
+      // ✅ НОВАЯ ЛОГИКА: Session-based refresh
+      if (sessionId) {
+        return await this.refreshTokenBySession(payload, refreshToken, sessionId, ip, userAgent);
       }
 
-      // Проверяем, существует ли токен в Redis
-      const isValid = await this.redis.isRefreshTokenValid(
+      // ✅ LEGACY: Для старых токенов без sessionId
+      return await this.refreshTokenLegacy(payload, refreshToken, ip, userAgent);
+
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.error('Token refresh error:', error.message);
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+  }
+
+  /**
+   * ✅ НОВЫЙ: Session-based refresh (для токенов с sessionId)
+   * Простая логика без token reuse detection — каждая сессия независима
+   */
+  private async refreshTokenBySession(
+    payload: JwtPayload,
+    refreshToken: string,
+    sessionId: string,
+    ip: string,
+    userAgent: string,
+  ): Promise<RefreshTokenResponse> {
+    // Проверяем что сессия существует и токен совпадает
+    const isValid = await this.redis.isRefreshTokenValidBySession(
+      payload.sub,
+      payload.role,
+      sessionId,
+      refreshToken,
+    );
+
+    if (!isValid) {
+      this.logger.warn(`Invalid session ${sessionId.substring(0, 8)}... for user ${payload.sub} (${payload.role})`);
+      throw new UnauthorizedException('Session expired or invalid. Please login again.');
+    }
+
+    // Генерируем новые токены (сохраняем тот же sessionId!)
+    const newPayload: JwtPayload = {
+      sub: payload.sub,
+      login: payload.login,
+      role: payload.role,
+      name: payload.name,
+      cities: payload.cities,
+      sid: sessionId, // Тот же sessionId — сессия продолжается
+    };
+
+    const newAccessToken = this.jwtService.sign(newPayload);
+    const newRefreshToken = this.jwtService.sign(newPayload, {
+      secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
+      expiresIn: SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL,
+    });
+
+    // Обновляем токен для этой сессии (атомарно)
+    const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS;
+    await this.redis.updateSessionToken(payload.sub, payload.role, sessionId, newRefreshToken, refreshTTL);
+
+    this.logger.log(`Token refreshed for ${payload.role} user (session: ${sessionId.substring(0, 8)}...)`);
+    
+    this.auditService.logTokenRefresh(payload.sub, payload.role, ip, userAgent)
+      .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
+
+    return {
+      success: true,
+      data: {
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+      },
+    };
+  }
+
+  /**
+   * ✅ LEGACY: Старая логика refresh для токенов без sessionId
+   * Оставлена для обратной совместимости
+   */
+  private async refreshTokenLegacy(
+    payload: JwtPayload,
+    refreshToken: string,
+    ip: string,
+    userAgent: string,
+  ): Promise<RefreshTokenResponse> {
+    this.logger.debug(`Legacy refresh for user ${payload.sub} (no sessionId)`);
+
+    // Idempotent check
+    const tokenHash = this.redis.hashToken(refreshToken);
+    const cachedResult = await this.redis.safeExecute(
+      () => this.redis.getCachedRefreshResult(tokenHash),
+      null,
+      'getCachedRefreshResult',
+    );
+
+    if (cachedResult) {
+      this.logger.log(`Idempotent refresh: returning cached tokens for ${payload.role} user`);
+      return { success: true, data: cachedResult };
+    }
+
+    // Проверяем валидность токена
+    const isValid = await this.redis.isRefreshTokenValid(payload.sub, payload.role, refreshToken);
+
+    if (!isValid) {
+      const wasRecentlyRevoked = await this.redis.wasTokenRecentlyRevoked(
         payload.sub,
         payload.role,
         refreshToken,
       );
 
-      if (!isValid) {
-        // 🚨 Проверяем: была ли попытка повторного использования отозванного токена
-        const wasRecentlyRevoked = await this.redis.wasTokenRecentlyRevoked(
-          payload.sub,
-          payload.role,
-          refreshToken,
+      if (wasRecentlyRevoked) {
+        const cachedAfterRevoke = await this.redis.safeExecute(
+          () => this.redis.getCachedRefreshResult(tokenHash),
+          null,
+          'getCachedRefreshResultAfterRevoke',
         );
 
-        if (wasRecentlyRevoked) {
-          // ✅ FIX: Ещё раз проверяем кеш - возможно параллельный запрос уже обработался
-          const cachedAfterRevoke = await this.redis.safeExecute(
-            () => this.redis.getCachedRefreshResult(tokenHash),
-            null,
-            'getCachedRefreshResultAfterRevoke',
-          );
-
-          if (cachedAfterRevoke) {
-            this.logger.log(`Idempotent refresh (after revoke check): returning cached tokens for ${payload.role} user`);
-            return {
-              success: true,
-              data: cachedAfterRevoke,
-            };
-          }
-
-          // SECURITY ALERT: Token reuse detected! Возможная кража токена
-          // Но только если прошло больше REFRESH_GRACE_PERIOD_SECONDS
-          this.logger.error(
-            `🚨 SECURITY ALERT: Refresh token reuse detected for user ${payload.sub} (${payload.role}). Revoking all user tokens!`,
-          );
-          
-          // ✅ AUDIT: Логируем критическое событие безопасности (await для критических событий)
-          await this.auditService.logTokenReuse(payload.sub, payload.role, ip, userAgent);
-
-          // Отзываем ВСЕ токены пользователя для безопасности
-          await this.redis.revokeAllUserTokens(payload.sub, payload.role);
-
-          throw new UnauthorizedException(
-            'Security violation detected. All sessions have been terminated. Please login again.',
-          );
+        if (cachedAfterRevoke) {
+          return { success: true, data: cachedAfterRevoke };
         }
 
-        throw new UnauthorizedException('Refresh token has been revoked');
+        this.logger.error(
+          `🚨 SECURITY ALERT: Refresh token reuse detected for user ${payload.sub} (${payload.role}). Revoking all user tokens!`,
+        );
+        await this.auditService.logTokenReuse(payload.sub, payload.role, ip, userAgent);
+        await this.redis.revokeAllUserTokens(payload.sub, payload.role);
+
+        throw new UnauthorizedException(
+          'Security violation detected. All sessions have been terminated. Please login again.',
+        );
       }
 
-      // Удаляем старый refresh токен с отслеживанием (для детекции повторного использования)
-      // Храним информацию об отозванном токене для детекции token reuse attack
-      await this.redis.revokeRefreshTokenWithTracking(
-        payload.sub,
-        payload.role,
-        refreshToken,
-        SecurityConfig.REVOKED_TOKEN_TRACKING_TTL,
-      );
+      throw new UnauthorizedException('Refresh token has been revoked');
+    }
 
-      const newPayload: JwtPayload = {
-        sub: payload.sub,
-        login: payload.login,
-        role: payload.role,
-        name: payload.name,
-        cities: payload.cities,
-        sid: payload.sid, // ✅ FIX: Сохраняем session ID при refresh для консистентности
-      };
+    // Генерируем НОВЫЙ sessionId для миграции на session-based
+    const newSessionId = this.generateSessionId();
 
-      // Генерируем новую пару токенов
-      const newAccessToken = this.jwtService.sign(newPayload);
-      const newRefreshToken = this.jwtService.sign(newPayload, {
-        secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-        expiresIn: SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL, // ✅ FIX: Используем константу (90d)
-      });
+    const newPayload: JwtPayload = {
+      sub: payload.sub,
+      login: payload.login,
+      role: payload.role,
+      name: payload.name,
+      cities: payload.cities,
+      sid: newSessionId, // Теперь токен будет с sessionId
+    };
 
-      // Сохраняем новый refresh токен в Redis
-      const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS; // ✅ FIX: Используем константу
-      await this.redis.saveRefreshToken(payload.sub, payload.role, newRefreshToken, refreshTTL);
+    const newAccessToken = this.jwtService.sign(newPayload);
+    const newRefreshToken = this.jwtService.sign(newPayload, {
+      secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
+      expiresIn: SecurityConfig.REFRESH_TOKEN_DEFAULT_TTL,
+    });
 
-      // ✅ FIX: Кешируем результат refresh для idempotent повторных запросов
-      await this.redis.safeExecute(
-        () => this.redis.cacheRefreshResult(
-          tokenHash,
-          newAccessToken,
-          newRefreshToken,
-          SecurityConfig.REFRESH_GRACE_PERIOD_SECONDS,
-        ),
-        undefined,
-        'cacheRefreshResult',
-      );
+    // Кешируем результат
+    await this.redis.safeExecute(
+      () => this.redis.cacheRefreshResult(
+        tokenHash,
+        newAccessToken,
+        newRefreshToken,
+        SecurityConfig.REFRESH_GRACE_PERIOD_SECONDS,
+      ),
+      undefined,
+      'cacheRefreshResult',
+    );
 
-      this.logger.log(`Token refreshed for ${payload.role} user`);
-      
-      // ✅ FIX #12: Добавлен .catch() для обработки ошибок
-      this.auditService.logTokenRefresh(payload.sub, payload.role, ip, userAgent)
-        .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
+    // Сохраняем НОВУЮ сессию (session-based)
+    const refreshTTL = SecurityConfig.REFRESH_TOKEN_TTL_SECONDS;
+    await this.redis.saveRefreshTokenBySession(payload.sub, payload.role, newSessionId, newRefreshToken, refreshTTL);
 
-      return {
-        success: true,
-        data: {
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-        },
-      };
+    // Удаляем старый legacy токен
+    await this.redis.revokeRefreshTokenWithTracking(
+      payload.sub,
+      payload.role,
+      refreshToken,
+      SecurityConfig.REVOKED_TOKEN_TRACKING_TTL,
+    );
+
+    this.logger.log(`Token refreshed for ${payload.role} user (migrated to session: ${newSessionId.substring(0, 8)}...)`);
+    
+    this.auditService.logTokenRefresh(payload.sub, payload.role, ip, userAgent)
+      .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
+
+    return {
+      success: true,
+      data: {
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+      },
+    };
     } catch (error) {
       if (error instanceof UnauthorizedException) {
         throw error;
@@ -714,13 +793,21 @@ export class AuthService implements OnModuleInit {
   async logout(
     user: JwtPayload, 
     ip: string = '0.0.0.0', 
-    userAgent: string = 'Unknown'
+    userAgent: string = 'Unknown',
+    logoutAll: boolean = false, // Опционально: выйти со всех устройств
   ): Promise<void> {
-    const { sub: userId, role } = user;
-    await this.redis.revokeAllUserTokens(userId, role);
-    this.logger.log(`User logged out: ${role} user`);
+    const { sub: userId, role, sid: sessionId } = user;
+
+    if (logoutAll || !sessionId) {
+      // Выход со всех устройств (или legacy токен без sessionId)
+      await this.redis.revokeAllUserTokens(userId, role);
+      this.logger.log(`User logged out from ALL devices: ${role} user`);
+    } else {
+      // Выход только с текущего устройства (по sessionId)
+      await this.redis.revokeSession(userId, role, sessionId);
+      this.logger.log(`User logged out from session ${sessionId.substring(0, 8)}...: ${role} user`);
+    }
     
-    // ✅ FIX #12: Добавлен .catch() для обработки ошибок
     this.auditService.logLogout(userId, role, ip, userAgent)
       .catch(err => this.logger.error(`Audit log failed: ${err.message}`));
   }

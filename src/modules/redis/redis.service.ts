@@ -122,15 +122,160 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.logger.debug(`Force logout flag cleared for user ${userId} (${role})`);
   }
 
-  // ==================== REFRESH TOKENS ====================
+  // ==================== REFRESH TOKENS (SESSION-BASED) ====================
 
   /**
-   * ✅ ОПТИМИЗИРОВАНО: Сохранить refresh токен в Redis с SET для быстрого удаления всех токенов
-   * ✅ FIX: Добавлено ограничение максимального количества сессий
+   * ✅ НОВАЯ АРХИТЕКТУРА: Хранение токенов по Session ID
+   * 
+   * Структура ключей:
+   * - session:{role}:{userId}:{sessionId} -> refresh_token (сам токен)
+   * - user_sessions:{role}:{userId} -> SET of sessionIds
+   * 
+   * Это решает проблему token reuse при входе с нескольких устройств:
+   * - Каждое устройство имеет свой sessionId
+   * - Refresh токен привязан к sessionId, а не к самому себе
+   * - При refresh проверяется sessionId, а не весь токен
+   */
+
+  /**
+   * Сохранить refresh токен по session ID
    * @param userId ID пользователя
    * @param role Роль пользователя
+   * @param sessionId Уникальный ID сессии (из JWT payload.sid)
    * @param token Refresh токен
-   * @param ttlSeconds TTL в секундах (7 дней по умолчанию)
+   * @param ttlSeconds TTL в секундах
+   */
+  async saveRefreshTokenBySession(
+    userId: number,
+    role: string,
+    sessionId: string,
+    token: string,
+    ttlSeconds: number = 7 * 24 * 60 * 60,
+  ): Promise<void> {
+    const sessionKey = `session:${role}:${userId}:${sessionId}`;
+    const userSessionsSet = `user_sessions:${role}:${userId}`;
+    
+    // Проверяем количество существующих сессий
+    const currentSessionCount = await this.client.scard(userSessionsSet);
+    
+    if (currentSessionCount >= SecurityConfig.MAX_SESSIONS_PER_USER) {
+      // Удаляем случайные старые сессии
+      const sessionsToRemove = currentSessionCount - SecurityConfig.MAX_SESSIONS_PER_USER + 1;
+      const oldSessions = await this.client.srandmember(userSessionsSet, sessionsToRemove);
+      
+      if (oldSessions && oldSessions.length > 0) {
+        const pipeline = this.client.pipeline();
+        for (const oldSessionId of oldSessions) {
+          const oldSessionKey = `session:${role}:${userId}:${oldSessionId}`;
+          pipeline.del(oldSessionKey);
+          pipeline.srem(userSessionsSet, oldSessionId);
+        }
+        await pipeline.exec();
+        
+        this.logger.warn(
+          `⚠️ Session limit reached for user ${userId} (${role}). ` +
+          `Removed ${oldSessions.length} old session(s). Max: ${SecurityConfig.MAX_SESSIONS_PER_USER}`,
+        );
+      }
+    }
+    
+    // Сохраняем сессию атомарно
+    const pipeline = this.client.pipeline();
+    pipeline.setex(sessionKey, ttlSeconds, token);
+    pipeline.sadd(userSessionsSet, sessionId);
+    pipeline.expire(userSessionsSet, ttlSeconds);
+    await pipeline.exec();
+    
+    this.logger.debug(`Session ${sessionId.substring(0, 8)}... saved for user ${userId} (${role})`);
+  }
+
+  /**
+   * Проверить валидность refresh токена по session ID
+   * Возвращает true если sessionId существует И токен совпадает
+   */
+  async isRefreshTokenValidBySession(
+    userId: number, 
+    role: string, 
+    sessionId: string,
+    token: string,
+  ): Promise<boolean> {
+    if (!sessionId) {
+      // Fallback для старых токенов без sessionId
+      return this.isRefreshTokenValid(userId, role, token);
+    }
+    
+    const sessionKey = `session:${role}:${userId}:${sessionId}`;
+    const storedToken = await this.client.get(sessionKey);
+    
+    // Проверяем что токен существует И совпадает
+    return storedToken === token;
+  }
+
+  /**
+   * Обновить refresh токен для существующей сессии
+   * Атомарно заменяет старый токен на новый
+   */
+  async updateSessionToken(
+    userId: number,
+    role: string,
+    sessionId: string,
+    newToken: string,
+    ttlSeconds: number = 7 * 24 * 60 * 60,
+  ): Promise<void> {
+    const sessionKey = `session:${role}:${userId}:${sessionId}`;
+    
+    // Просто перезаписываем токен для этой сессии
+    await this.client.setex(sessionKey, ttlSeconds, newToken);
+    
+    this.logger.debug(`Session ${sessionId.substring(0, 8)}... token updated for user ${userId} (${role})`);
+  }
+
+  /**
+   * Удалить сессию (при logout или принудительном выходе)
+   */
+  async revokeSession(userId: number, role: string, sessionId: string): Promise<void> {
+    const sessionKey = `session:${role}:${userId}:${sessionId}`;
+    const userSessionsSet = `user_sessions:${role}:${userId}`;
+    
+    const pipeline = this.client.pipeline();
+    pipeline.del(sessionKey);
+    pipeline.srem(userSessionsSet, sessionId);
+    await pipeline.exec();
+    
+    this.logger.debug(`Session ${sessionId.substring(0, 8)}... revoked for user ${userId} (${role})`);
+  }
+
+  /**
+   * Удалить все сессии пользователя
+   */
+  async revokeAllUserSessions(userId: number, role: string): Promise<void> {
+    const userSessionsSet = `user_sessions:${role}:${userId}`;
+    
+    const sessionIds = await this.client.smembers(userSessionsSet);
+    
+    if (sessionIds.length === 0) {
+      this.logger.debug(`No sessions found for user ${userId} (${role})`);
+      return;
+    }
+    
+    const pipeline = this.client.pipeline();
+    
+    sessionIds.forEach(sessionId => {
+      const sessionKey = `session:${role}:${userId}:${sessionId}`;
+      pipeline.del(sessionKey);
+    });
+    
+    pipeline.del(userSessionsSet);
+    await pipeline.exec();
+    
+    this.logger.debug(`✅ All sessions revoked for user ${userId} (${role}): ${sessionIds.length} sessions deleted`);
+  }
+
+  // ==================== LEGACY REFRESH TOKENS (для обратной совместимости) ====================
+
+  /**
+   * @deprecated Используйте saveRefreshTokenBySession для новых токенов
+   * Оставлено для обратной совместимости со старыми токенами без sessionId
    */
   async saveRefreshToken(
     userId: number,
@@ -141,11 +286,9 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     const tokenKey = `refresh_token:${role}:${userId}:${token}`;
     const userTokensSet = `user_tokens:${role}:${userId}`;
     
-    // ✅ FIX: Проверяем количество существующих сессий
     const currentSessionCount = await this.client.scard(userTokensSet);
     
     if (currentSessionCount >= SecurityConfig.MAX_SESSIONS_PER_USER) {
-      // Удаляем самые старые токены (FIFO через SPOP не гарантирован, используем SRANDMEMBER + SREM)
       const tokensToRemove = currentSessionCount - SecurityConfig.MAX_SESSIONS_PER_USER + 1;
       const oldTokens = await this.client.srandmember(userTokensSet, tokensToRemove);
       
@@ -157,33 +300,20 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
           pipeline.srem(userTokensSet, oldToken);
         }
         await pipeline.exec();
-        
-        this.logger.warn(
-          `⚠️ Session limit reached for user ${userId} (${role}). ` +
-          `Removed ${oldTokens.length} old session(s). Max: ${SecurityConfig.MAX_SESSIONS_PER_USER}`,
-        );
       }
     }
     
-    // Используем pipeline для атомарности и производительности
     const pipeline = this.client.pipeline();
-    
-    // 1. Сохраняем сам токен с TTL
     pipeline.setex(tokenKey, ttlSeconds, '1');
-    
-    // 2. Добавляем токен в SET для быстрого поиска всех токенов юзера
     pipeline.sadd(userTokensSet, token);
-    
-    // 3. Обновляем TTL на SET (продлеваем при каждом новом токене)
     pipeline.expire(userTokensSet, ttlSeconds);
-    
     await pipeline.exec();
     
-    this.logger.debug(`Refresh token saved for user ${userId} (${role}) with SET indexing`);
+    this.logger.debug(`[LEGACY] Refresh token saved for user ${userId} (${role})`);
   }
 
   /**
-   * Проверить существование refresh токена
+   * @deprecated Используйте isRefreshTokenValidBySession для новых токенов
    */
   async isRefreshTokenValid(userId: number, role: string, token: string): Promise<boolean> {
     const key = `refresh_token:${role}:${userId}:${token}`;
@@ -192,55 +322,49 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * ✅ ОПТИМИЗИРОВАНО: Удалить refresh токен (при logout или refresh)
+   * @deprecated Используйте revokeSession для новых токенов
    */
   async revokeRefreshToken(userId: number, role: string, token: string): Promise<void> {
     const tokenKey = `refresh_token:${role}:${userId}:${token}`;
     const userTokensSet = `user_tokens:${role}:${userId}`;
     
-    // Используем pipeline для атомарности
     const pipeline = this.client.pipeline();
     pipeline.del(tokenKey);
-    pipeline.srem(userTokensSet, token); // Удаляем из SET
-    
+    pipeline.srem(userTokensSet, token);
     await pipeline.exec();
     
-    this.logger.debug(`Refresh token revoked for user ${userId} (${role})`);
+    this.logger.debug(`[LEGACY] Refresh token revoked for user ${userId} (${role})`);
   }
 
   /**
-   * ✅ ОПТИМИЗИРОВАНО: Удалить все refresh токены пользователя за O(N) вместо O(N*M)
-   * Использует Redis SET для мгновенного получения списка всех токенов юзера
+   * Удалить все refresh токены пользователя (и новые сессии, и legacy токены)
    */
   async revokeAllUserTokens(userId: number, role: string): Promise<void> {
+    // Удаляем новые сессии
+    await this.revokeAllUserSessions(userId, role);
+    
+    // Удаляем legacy токены
     const userTokensSet = `user_tokens:${role}:${userId}`;
     
     try {
-      // Получаем все токены пользователя из SET за O(1) операцию
       const tokens = await this.client.smembers(userTokensSet);
       
       if (tokens.length === 0) {
-        this.logger.debug(`No tokens found for user ${userId} (${role})`);
         return;
       }
       
-      // Удаляем все токены одним pipeline запросом
       const pipeline = this.client.pipeline();
       
-      // Удаляем каждый токен
       tokens.forEach(token => {
         const tokenKey = `refresh_token:${role}:${userId}:${token}`;
         pipeline.del(tokenKey);
       });
       
-      // Удаляем сам SET
       pipeline.del(userTokensSet);
-      
-      // Выполняем все операции атомарно
       await pipeline.exec();
       
       this.logger.debug(
-        `✅ All tokens revoked for user ${userId} (${role}): ${tokens.length} tokens deleted via SET optimization`,
+        `✅ All legacy tokens revoked for user ${userId} (${role}): ${tokens.length} tokens deleted`,
       );
     } catch (error) {
       // Fallback на старый метод через SCAN если что-то пошло не так
