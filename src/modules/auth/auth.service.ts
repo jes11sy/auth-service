@@ -62,6 +62,15 @@ export class AuthService implements OnModuleInit {
   }
 
   /**
+   * ✅ FIX: Генерация уникального session ID для каждого устройства
+   * Решает проблему token reuse при входе с нескольких устройств одновременно
+   */
+  private generateSessionId(): string {
+    const crypto = require('crypto');
+    return crypto.randomBytes(16).toString('hex');
+  }
+
+  /**
    * ✅ FIX #4: Проверка блокировки в in-memory fallback при недоступности Redis
    */
   private checkMemoryRateLimiter(identifier: string): boolean {
@@ -230,6 +239,7 @@ export class AuthService implements OnModuleInit {
    * Вход пользователя в систему
    * ✅ Использует константы из SecurityConfig
    * ✅ Логирует все события через AuditService
+   * ✅ FIX: Уникальный session ID для каждого устройства (решает token reuse при multi-device)
    */
   async login(loginDto: LoginDto, ip: string = '0.0.0.0', userAgent: string = 'Unknown'): Promise<LoginResponse> {
     const { login, password, role } = loginDto;
@@ -297,13 +307,18 @@ export class AuthService implements OnModuleInit {
       }
     }
 
-    // Формируем JWT payload
+    // ✅ FIX: Генерируем уникальный session ID для каждого устройства/сессии
+    // Это решает проблему token reuse при входе с нескольких устройств
+    const sessionId = this.generateSessionId();
+
+    // Формируем JWT payload с уникальным session ID
     const payload: JwtPayload = {
       sub: user.id,
       login: user.login,
       role: user.role,
       name: user.name,
       cities: user.cities || undefined,
+      sid: sessionId, // ✅ FIX: Session ID для уникальности токена на каждом устройстве
     };
 
     const accessToken = this.jwtService.sign(payload);
@@ -466,6 +481,7 @@ export class AuthService implements OnModuleInit {
         role: payload.role,
         name: payload.name,
         cities: payload.cities,
+        sid: payload.sid, // ✅ FIX: Сохраняем session ID при refresh для консистентности
       };
 
       // Генерируем новую пару токенов

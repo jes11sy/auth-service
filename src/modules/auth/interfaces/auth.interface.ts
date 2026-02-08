@@ -36,6 +36,7 @@ export interface AuthUser extends BaseUser {
 
 /**
  * JWT Payload структура
+ * ✅ FIX: Добавлен sid (session ID) для уникальных токенов на каждом устройстве
  */
 export interface JwtPayload {
   sub: number;
@@ -43,6 +44,7 @@ export interface JwtPayload {
   role: UserRole;
   name?: string;
   cities?: string[];
+  sid?: string;  // ✅ FIX: Session ID - решает проблему token reuse при multi-device login
   iat?: number;
   exp?: number;
 }
