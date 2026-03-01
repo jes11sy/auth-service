@@ -19,7 +19,7 @@ interface ActiveSession {
 
 interface LoginHistoryEntry {
   id: number;
-  createdAt: string;
+  timestamp: string;
   ip: string;
   device: string;
   deviceType: 'mobile' | 'tablet' | 'desktop';
@@ -55,7 +55,7 @@ export class SessionsController {
     const keys = await this.getAllUserTokenKeys();
 
     for (const key of keys) {
-      const match = key.match(/user_tokens:(.*?):(\d+)/);
+      const match = key.match(/user_sessions:(.*?):(\d+)/);
       if (!match) continue;
 
       const role = match[1];
@@ -202,7 +202,7 @@ export class SessionsController {
       const parsedUA = parseUserAgent(log.userAgent);
       return {
         id: log.id,
-        createdAt: log.createdAt.toISOString(),
+        timestamp: log.createdAt.toISOString(),
         ip: log.ip,
         device: parsedUA.device,
         deviceType: parsedUA.deviceType,
@@ -228,8 +228,8 @@ export class SessionsController {
     let cursor = '0';
 
     do {
-      const result = await (this.redis as any).client.scan(
-        cursor, 'MATCH', 'user_tokens:*', 'COUNT', 100,
+      const result = await this.redis.getClient().scan(
+        cursor, 'MATCH', 'user_sessions:*', 'COUNT', 100,
       );
       cursor = result[0];
       keys.push(...result[1]);
