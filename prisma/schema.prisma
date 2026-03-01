@@ -1,152 +1,217 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
 }
 
-// ✅ FIX: Connection pooling рекомендации
+// Connection pooling рекомендации:
 // В production DATABASE_URL должен содержать параметры пула:
 // postgresql://user:pass@host:5432/db?connection_limit=20&pool_timeout=30
-// 
-// Рекомендуемые параметры:
-// - connection_limit: количество соединений (CPU cores * 2 + 1)
-// - pool_timeout: таймаут ожидания соединения (30 сек)
-// - connect_timeout: таймаут подключения (10 сек)
-// - socket_timeout: таймаут сокета (30 сек)
-//
-// Для Prisma Accelerate (managed pooling):
-// - Используйте directUrl для миграций
-// - Основной url через Accelerate endpoint
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
-  // ✅ Для использования Prisma Accelerate раскомментируйте:
-  // directUrl = env("DIRECT_DATABASE_URL")
+  schemas  = ["auth_service", "audit_logs", "error_logs"]
 }
 
-// Существующие таблицы аутентификации
-// ✅ FIX #148: Пароли хранятся в виде bcrypt хэша (12 раундов)
-// Хэширование выполняется в auth.service.ts перед сохранением
-model CallcentreAdmin {
+// ─────────────────────────────────────────
+// Schema: auth_service
+// ─────────────────────────────────────────
+
+/// Администраторы системы
+model Admin {
+  id        Int       @id @default(autoincrement())
+  role      String    @db.VarChar(50)              /// Роль пользователя
+  name      String    @db.VarChar(255)             /// ФИО
+  login     String    @unique @db.VarChar(255)     /// Логин для входа
+  password  String    @db.VarChar(255)             /// Хеш пароля (bcrypt)
+  status    String    @db.VarChar(50)              /// Статус (active/inactive)
+  note      String?   @db.Text                    /// Заметка
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")           /// Soft delete
+
+  @@index([status])
+  @@schema("auth_service")
+  @@map("admins")
+}
+
+/// Операторы колл-центра
+model Operator {
+  id         Int       @id @default(autoincrement())
+  role       String    @db.VarChar(50)             /// Роль пользователя
+  name       String    @db.VarChar(255)            /// ФИО
+  login      String    @unique @db.VarChar(255)    /// Логин для входа
+  password   String    @db.VarChar(255)            /// Хеш пароля (bcrypt)
+  status     String    @db.VarChar(50)             /// Статус (active/inactive)
+  cityIds    Int[]     @default([]) @map("city_ids") /// ID городов из references_service
+  passport   String?   @db.VarChar(500)            /// Ссылка на скан паспорта
+  contract   String?   @db.VarChar(500)            /// Ссылка на скан договора
+  note       String?   @db.Text                   /// Заметка
+  sipAddress String?   @map("sip_address") @db.VarChar(255) /// SIP адрес для телефонии
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  deletedAt  DateTime? @map("deleted_at")           /// Soft delete
+
+  @@index([status])
+  @@index([name])
+  @@schema("auth_service")
+  @@map("operators")
+}
+
+/// Директора (руководители по городам)
+model Director {
+  id        Int       @id @default(autoincrement())
+  role      String    @db.VarChar(50)              /// Роль пользователя
+  name      String    @db.VarChar(255)             /// ФИО
+  login     String    @unique @db.VarChar(255)     /// Логин для входа
+  password  String    @db.VarChar(255)             /// Хеш пароля (bcrypt)
+  status    String    @db.VarChar(50)              /// Статус (active/inactive)
+  cityIds   Int[]     @default([]) @map("city_ids") /// ID городов из references_service
+  passport  String?   @db.VarChar(500)             /// Ссылка на скан паспорта
+  contract  String?   @db.VarChar(500)             /// Ссылка на скан договора
+  note      String?   @db.Text                    /// Заметка
+  tgId      String?   @map("tg_id") @db.VarChar(50) /// Telegram ID для уведомлений
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")           /// Soft delete
+
+  @@index([status])
+  @@index([name])
+  @@schema("auth_service")
+  @@map("directors")
+}
+
+/// Мастера (исполнители заказов)
+model Master {
+  id        Int       @id @default(autoincrement())
+  role      String    @db.VarChar(50)              /// Роль пользователя
+  name      String    @db.VarChar(255)             /// ФИО
+  login     String?   @unique @db.VarChar(255)     /// Логин (опционально)
+  password  String?   @db.VarChar(255)             /// Хеш пароля (опционально)
+  status    String    @db.VarChar(50)              /// Статус (active/inactive)
+  cityIds   Int[]     @default([]) @map("city_ids") /// ID городов из references_service
+  passport  String?   @db.VarChar(500)             /// Ссылка на скан паспорта
+  contract  String?   @db.VarChar(500)             /// Ссылка на скан договора
+  note      String?   @db.Text                    /// Заметка
+  chatId    String?   @map("chat_id") @db.VarChar(50) /// Telegram Chat ID
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")           /// Soft delete
+
+  schedules MasterSchedule[]
+
+  @@index([status])
+  @@index([name])
+  @@index([chatId])
+  @@schema("auth_service")
+  @@map("masters")
+}
+
+
+/// Расписание мастеров
+model MasterSchedule {
   id        Int      @id @default(autoincrement())
-  login     String   @unique
-  password  String   /// @encrypted bcrypt hash, 12 rounds
-  note      String?
+  masterId  Int      @map("master_id")            /// FK на masters
+  date      DateTime @db.Date                     /// Дата
+  status    String   @db.VarChar(50)              /// working/day_off/vacation
+  note      String?  @db.Text                    /// Заметка
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  // ✅ FIX #167: REMOVED @@index([login]) — @unique уже создаёт индекс автоматически
-  @@map("callcentre_admin")
+  master Master @relation(fields: [masterId], references: [id], onDelete: Cascade)
+
+  @@unique([masterId, date])
+  @@index([masterId])
+  @@index([date])
+  @@index([status])
+  @@index([date, status])
+  @@schema("auth_service")
+  @@map("master_schedules")
 }
 
-model CallcentreOperator {
-  id         Int      @id @default(autoincrement())
-  name       String
-  login      String   @unique
-  password   String   /// @encrypted bcrypt hash, 12 rounds
-  city       String
-  status     String
-  statusWork String   @map("status_work")
-  passport   String?
-  contract   String?
-  dateCreate DateTime @map("date_create")
-  note       String?
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  sipAddress String?  @map("sip_address")
+/// Рабочие сессии операторов (учёт рабочего времени и статистики)
+model OperatorWorkSession {
+  id         Int       @id @default(autoincrement())
+  operatorId Int       @map("operator_id")        /// FK на operators
+  startedAt  DateTime  @map("started_at")         /// Начало смены
+  endedAt    DateTime? @map("ended_at")           /// Конец смены
+  status     String    @db.VarChar(50)            /// active/break/ended
+  createdAt  DateTime  @default(now()) @map("created_at")
 
-  // ✅ ИСПРАВЛЕНИЕ PERF-002: Performance Indexes
-  @@index([status])              // Для быстрой фильтрации по статусу
-  @@index([status, login])       // Составной индекс для login query с проверкой статуса
-  @@index([city])                // Для фильтрации по городу
-  @@index([statusWork])          // Для фильтрации по статусу работы
-  @@map("callcentre_operator")
+  @@index([operatorId])
+  @@index([status])
+  @@index([startedAt])
+  @@index([operatorId, startedAt])
+  @@schema("auth_service")
+  @@map("operator_work_sessions")
 }
 
-model Director {
-  id          Int      @id @default(autoincrement())
-  cities      String[] // Массив городов
-  name        String
-  login       String   @unique
-  password    String   /// @encrypted bcrypt hash, 12 rounds
-  contractDoc String?  @map("contract_doc")
-  passportDoc String?  @map("passport_doc")
-  dateCreate  DateTime @default(now()) @map("date_create")
-  note        String?
-  tgId        String?  @map("tg_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+/// Сессии пользователей (JWT refresh tokens)
+model Session {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")           /// ID пользователя
+  userType     String   @map("user_type") @db.VarChar(20) /// admin/operator/director/master
+  refreshToken String   @map("refresh_token") @db.VarChar(500) /// Refresh token
+  ip           String?  @db.VarChar(45)           /// IP адрес
+  userAgent    String?  @map("user_agent") @db.Text /// User Agent
+  expiresAt    DateTime @map("expires_at")        /// Срок действия
+  createdAt    DateTime @default(now()) @map("created_at")
 
-  // ✅ FIX #167: REMOVED @@index([login]) — @unique уже создаёт индекс автоматически
-  @@map("director")
+  @@index([userId, userType])
+  @@index([refreshToken])
+  @@index([expiresAt])
+  @@schema("auth_service")
+  @@map("sessions")
 }
 
-model Master {
-  id          Int      @id @default(autoincrement())
-  cities      String[] // Массив городов
-  name        String
-  login       String?  @unique
-  password    String?  /// @encrypted bcrypt hash, 12 rounds (nullable for masters without login)
-  passportDoc String?  @map("passport_doc")
-  contractDoc String?  @map("contract_doc")
-  statusWork  String   @map("status_work")
-  dateCreate  DateTime @default(now()) @map("date_create")
-  note        String?
-  tgId        String?  @map("tg_id")
-  chatId      String?  @map("chat_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+// ─────────────────────────────────────────
+// Schema: audit_logs
+// ─────────────────────────────────────────
 
-  // ✅ FIX #167: Оптимизированные индексы
-  // REMOVED: @@index([statusWork]) — дубликат, покрыт [statusWork, login]
-  @@index([statusWork, login])   // Составной индекс для login query с проверкой statusWork
-  @@map("master")
-}
-
-// Enum для типов пользователей
-enum UserRole {
-  CALLCENTRE_ADMIN
-  CALLCENTRE_OPERATOR
-  DIRECTOR
-  MASTER
-}
-
-// Audit logs для безопасности и мониторинга
-model AuditLog {
+/// Аудит auth-service (логины, регистрации, изменения пользователей)
+model AuditAuth {
   id        Int      @id @default(autoincrement())
-  timestamp DateTime @default(now())
-  eventType String   @db.VarChar(100)
-  userId    Int?
-  role      String?  @db.VarChar(50)
-  login     String?  @db.VarChar(255)
-  ip        String   @db.VarChar(45)
-  userAgent String   @db.Text
-  success   Boolean
-  metadata  Json?    @db.JsonB
+  eventType String   @map("event_type") @db.VarChar(100) /// login/logout/create/update/delete
+  userId    Int?     @map("user_id")                    /// ID пользователя
+  role      String?  @db.VarChar(50)                   /// Роль
+  login     String?  @db.VarChar(255)                  /// Логин
+  ip        String   @db.VarChar(45)                   /// IP адрес
+  userAgent String   @map("user_agent") @db.Text       /// User Agent
+  success   Boolean                                    /// Успешно ли действие
+  metadata  Json?    @db.JsonB                         /// Доп. данные (старые/новые значения)
+  createdAt DateTime @default(now()) @map("created_at")
 
-  @@index([userId, timestamp(sort: Desc)])
-  @@index([eventType, timestamp(sort: Desc)])
-  @@index([timestamp(sort: Desc)])
-  @@map("audit_logs")
+  @@index([eventType])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([success])
+  @@index([role, createdAt])
+  @@schema("audit_logs")
+  @@map("audit_auth")
 }
 
-model ErrorLog {
-  id            Int      @id @default(autoincrement())
-  timestamp     DateTime @default(now())
-  service       String   @db.VarChar(100)
-  errorType     String   @map("error_type") @db.VarChar(255)
-  errorMessage  String   @map("error_message") @db.Text
-  stackTrace    String?  @map("stack_trace") @db.Text
-  userId        Int?     @map("user_id")
-  userRole      String?  @map("user_role") @db.VarChar(50)
-  requestUrl    String?  @map("request_url") @db.VarChar(500)
-  requestMethod String?  @map("request_method") @db.VarChar(10)
-  ip            String?  @db.VarChar(45)
-  userAgent     String?  @map("user_agent") @db.Text
-  metadata      Json?    @db.JsonB
+// ─────────────────────────────────────────
+// Schema: error_logs
+// ─────────────────────────────────────────
 
-  @@index([timestamp(sort: Desc)])
-  @@index([service, timestamp(sort: Desc)])
+/// Ошибки auth-service
+model ErrorAuth {
+  id            Int      @id @default(autoincrement())
+  errorType     String   @map("error_type") @db.VarChar(255)  /// Тип ошибки
+  errorMessage  String   @map("error_message") @db.Text       /// Сообщение
+  stackTrace    String?  @map("stack_trace") @db.Text         /// Stack trace
+  userId        Int?     @map("user_id")                      /// ID пользователя
+  userRole      String?  @map("user_role") @db.VarChar(50)   /// Роль
+  requestUrl    String?  @map("request_url") @db.VarChar(500) /// URL запроса
+  requestMethod String?  @map("request_method") @db.VarChar(10) /// HTTP метод
+  ip            String?  @db.VarChar(45)                      /// IP адрес
+  userAgent     String?  @map("user_agent") @db.Text          /// User Agent
+  metadata      Json?    @db.JsonB                            /// Доп. данные
+  createdAt     DateTime @default(now()) @map("created_at")
+
   @@index([errorType])
   @@index([userId])
-  @@map("error_logs")
+  @@index([createdAt])
+  @@index([userRole, createdAt])
+  @@schema("error_logs")
+  @@map("error_auth")
 }
-

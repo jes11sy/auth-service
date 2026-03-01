@@ -4,7 +4,6 @@ import { CookieJwtAuthGuard } from '../auth/guards/cookie-jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
 
 interface ErrorLogsQuery {
-  service?: string;
   errorType?: string;
   startDate?: string;
   endDate?: string;
@@ -24,7 +23,6 @@ export class ErrorLogsController {
   @ApiResponse({ status: 200, description: 'Error logs retrieved' })
   @ApiResponse({ status: 403, description: 'Forbidden' })
   async getErrorLogs(@Query() query: ErrorLogsQuery, @Request() req) {
-    // Только админ может просматривать логи ошибок
     if (req.user.role !== 'admin') {
       throw new ForbiddenException('Only administrators can view error logs');
     }
@@ -33,12 +31,7 @@ export class ErrorLogsController {
     const limit = parseInt(query.limit || '50', 10);
     const skip = (page - 1) * limit;
 
-    // Строим WHERE условие
     const where: any = {};
-
-    if (query.service) {
-      where.service = query.service;
-    }
 
     if (query.errorType) {
       where.errorType = {
@@ -48,24 +41,20 @@ export class ErrorLogsController {
     }
 
     if (query.startDate || query.endDate) {
-      where.timestamp = {};
+      where.createdAt = {};
       if (query.startDate) {
-        where.timestamp.gte = new Date(query.startDate);
+        where.createdAt.gte = new Date(query.startDate);
       }
       if (query.endDate) {
-        where.timestamp.lte = new Date(query.endDate);
+        where.createdAt.lte = new Date(query.endDate);
       }
     }
 
-    // Получаем общее количество
-    const total = await this.prisma.errorLog.count({ where });
+    const total = await this.prisma.errorAuth.count({ where });
 
-    // Получаем логи
-    const logs = await this.prisma.errorLog.findMany({
+    const logs = await this.prisma.errorAuth.findMany({
       where,
-      orderBy: {
-        timestamp: 'desc',
-      },
+      orderBy: { createdAt: 'desc' },
       skip,
       take: limit,
     });
@@ -75,8 +64,7 @@ export class ErrorLogsController {
       data: {
         logs: logs.map(log => ({
           id: log.id,
-          timestamp: log.timestamp.toISOString(),
-          service: log.service,
+          createdAt: log.createdAt.toISOString(),
           errorType: log.errorType,
           errorMessage: log.errorMessage,
           stackTrace: log.stackTrace,
@@ -97,35 +85,4 @@ export class ErrorLogsController {
       },
     };
   }
-
-  @Get('/services')
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get list of services with errors (Admin only)' })
-  @ApiResponse({ status: 200, description: 'Services list retrieved' })
-  async getServices(@Request() req) {
-    if (req.user.role !== 'admin') {
-      throw new ForbiddenException('Only administrators can view services');
-    }
-
-    const services = await this.prisma.errorLog.groupBy({
-      by: ['service'],
-      _count: {
-        id: true,
-      },
-      orderBy: {
-        _count: {
-          id: 'desc',
-        },
-      },
-    });
-
-    return {
-      success: true,
-      data: services.map(s => ({
-        service: s.service,
-        count: s._count.id,
-      })),
-    };
-  }
 }
-

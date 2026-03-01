@@ -23,9 +23,9 @@ export class AuditCleanupService {
 
       this.logger.log(`[Cron] Starting audit logs cleanup (older than ${thirtyDaysAgo.toISOString()})`);
 
-      const result = await this.prisma.auditLog.deleteMany({
+      const result = await this.prisma.auditAuth.deleteMany({
         where: {
-          timestamp: {
+          createdAt: {
             lt: thirtyDaysAgo,
           },
         },

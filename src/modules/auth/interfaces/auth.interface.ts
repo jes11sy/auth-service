@@ -6,8 +6,6 @@ export enum UserRole {
   ADMIN = 'admin',
   MASTER = 'master',
   DIRECTOR = 'director',
-  CALLCENTRE_ADMIN = 'callcentre_admin',
-  CALLCENTRE_OPERATOR = 'callcentre_operator',
   OPERATOR = 'operator',
 }
 
@@ -25,11 +23,8 @@ export interface BaseUser {
  * Пользователь после успешной аутентификации
  */
 export interface AuthUser extends BaseUser {
-  cities?: string[];
-  city?: string;
+  cityIds?: number[];
   status?: string;
-  statusWork?: string;
-  tgId?: string;
   chatId?: string;
   sipAddress?: string;
 }
@@ -43,8 +38,8 @@ export interface JwtPayload {
   login: string;
   role: UserRole;
   name?: string;
-  cities?: string[];
-  sid?: string;  // ✅ FIX: Session ID - решает проблему token reuse при multi-device login
+  cityIds?: number[];
+  sid?: string;  // Session ID - решает проблему token reuse при multi-device login
   iat?: number;
   exp?: number;
 }
@@ -56,16 +51,13 @@ export interface UserProfile extends BaseUser {
   createdAt: Date;
   updatedAt: Date;
   note?: string;
-  dateCreate?: Date;
-  
+
   // Специфичные поля для разных ролей
-  cities?: string[];      // для director, master
-  city?: string;          // для operator
-  status?: string;        // для operator
-  statusWork?: string;    // для operator, master
-  tgId?: string;          // для director, master
-  chatId?: string;        // для master
-  sipAddress?: string;    // для operator
+  cityIds?: number[];   // для director, master, operator
+  status?: string;      // для всех кроме admin
+  tgId?: string;        // для director
+  chatId?: string;      // для master
+  sipAddress?: string;  // для operator
 }
 
 /**
@@ -80,8 +72,7 @@ export interface LoginResponse {
       login: string;
       name?: string;
       role: UserRole;
-      cities?: string[];
-      city?: string;
+      cityIds?: number[];
     };
     accessToken: string;
     refreshToken: string;

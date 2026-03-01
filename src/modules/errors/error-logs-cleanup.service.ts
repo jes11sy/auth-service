@@ -19,9 +19,9 @@ export class ErrorLogsCleanupService {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
     try {
-      const { count } = await this.prisma.errorLog.deleteMany({
+      const { count } = await this.prisma.errorAuth.deleteMany({
         where: {
-          timestamp: {
+          createdAt: {
             lt: sevenDaysAgo,
           },
         },

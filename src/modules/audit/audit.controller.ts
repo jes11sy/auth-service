@@ -120,15 +120,13 @@ export class AuditController {
 
       switch (role) {
         case 'admin':
-          user = await this.prisma.callcentreAdmin.findUnique({ where: { id: userId } });
-          // У админа нет поля name, используем login
-          return user?.login || `User #${userId}`;
+          user = await this.prisma.admin.findUnique({ where: { id: userId } });
+          return user?.name || user?.login || `User #${userId}`;
         case 'director':
           user = await this.prisma.director.findUnique({ where: { id: userId } });
           break;
-        case 'callcentre_operator':
         case 'operator':
-          user = await this.prisma.callcentreOperator.findUnique({ where: { id: userId } });
+          user = await this.prisma.operator.findUnique({ where: { id: userId } });
           break;
         case 'master':
           user = await this.prisma.master.findUnique({ where: { id: userId } });

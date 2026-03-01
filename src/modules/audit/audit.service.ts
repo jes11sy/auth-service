@@ -94,9 +94,9 @@ export class AuditService {
 
     // 2. ✅ FIX #9: Fire-and-forget запись в БД - не блокируем основной запрос
     // Критические события (LOGIN_BLOCKED, TOKEN_REUSE) логируются с await в вызывающем коде
-    this.prisma.auditLog.create({
+    this.prisma.auditAuth.create({
       data: {
-        timestamp: new Date(timestamp),
+        createdAt: new Date(timestamp),
         eventType: entry.eventType,
         userId: entry.userId,
         role: entry.role,

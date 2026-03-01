@@ -49,7 +49,7 @@ export class ProactiveRefreshInterceptor implements NestInterceptor {
                 login: request.user.login,
                 role: request.user.role,
                 name: request.user.name,
-                cities: request.user.cities,
+                cityIds: request.user.cityIds,
               };
 
               // ✅ ИСПРАВЛЕНИЕ: Используем JWT_SECRET для access token

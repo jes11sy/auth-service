@@ -136,7 +136,7 @@ export class AuthService implements OnModuleInit {
       // ✅ FIX: Загружаем только необходимые поля через select для оптимизации
       switch (role as UserRole) {
         case UserRole.ADMIN:
-          user = await this.prisma.callcentreAdmin.findUnique({
+          user = await this.prisma.admin.findUnique({
             where: { login },
             select: {
               id: true,
@@ -148,16 +148,15 @@ export class AuthService implements OnModuleInit {
           break;
 
         case UserRole.OPERATOR:
-          user = await this.prisma.callcentreOperator.findUnique({
+          user = await this.prisma.operator.findUnique({
             where: { login },
             select: {
               id: true,
               name: true,
               login: true,
               password: true,
-              city: true,
+              cityIds: true,
               status: true,
-              statusWork: true,
               sipAddress: true,
             },
           });
@@ -171,7 +170,7 @@ export class AuthService implements OnModuleInit {
               name: true,
               login: true,
               password: true,
-              cities: true,
+              cityIds: true,
               tgId: true,
             },
           });
@@ -185,9 +184,8 @@ export class AuthService implements OnModuleInit {
               name: true,
               login: true,
               password: true,
-              cities: true,
-              statusWork: true,
-              tgId: true,
+              cityIds: true,
+              status: true,
               chatId: true,
             },
           });
@@ -215,8 +213,8 @@ export class AuthService implements OnModuleInit {
       }
 
       if (role === UserRole.MASTER) {
-        // Проверяем что пароль задан и мастер работает
-        if (!user.password || user.statusWork !== 'работает') {
+        // Проверяем что пароль задан и мастер активен
+        if (!user.password || user.status !== 'active') {
           return null; // Не раскрываем причину
         }
       }
@@ -317,8 +315,8 @@ export class AuthService implements OnModuleInit {
       login: user.login,
       role: user.role,
       name: user.name,
-      cities: user.cities || undefined,
-      sid: sessionId, // ✅ FIX: Session ID для уникальности токена на каждом устройстве
+      cityIds: user.cityIds || undefined,
+      sid: sessionId,
     };
 
     const accessToken = this.jwtService.sign(payload);
@@ -372,8 +370,7 @@ export class AuthService implements OnModuleInit {
           login: user.login,
           name: user.name,
           role: user.role,
-          cities: user.cities,
-          city: user.city, // для оператора
+          cityIds: user.cityIds,
         },
         accessToken,
         refreshToken,
@@ -457,7 +454,7 @@ export class AuthService implements OnModuleInit {
       login: payload.login,
       role: payload.role,
       name: payload.name,
-      cities: payload.cities,
+      cityIds: payload.cityIds,
       sid: sessionId, // Тот же sessionId — сессия продолжается
     };
 
@@ -553,7 +550,7 @@ export class AuthService implements OnModuleInit {
       login: payload.login,
       role: payload.role,
       name: payload.name,
-      cities: payload.cities,
+      cityIds: payload.cityIds,
       sid: newSessionId, // Теперь токен будет с sessionId
     };
 
@@ -607,32 +604,30 @@ export class AuthService implements OnModuleInit {
    */
   private readonly profileConfig = {
     [UserRole.ADMIN]: {
-      model: 'callcentreAdmin' as const,
+      model: 'admin' as const,
       select: {
         id: true, login: true, note: true, createdAt: true, updatedAt: true,
       },
     },
     [UserRole.OPERATOR]: {
-      model: 'callcentreOperator' as const,
+      model: 'operator' as const,
       select: {
-        id: true, name: true, login: true, city: true, status: true,
-        statusWork: true, dateCreate: true, note: true, sipAddress: true,
-        createdAt: true, updatedAt: true,
+        id: true, name: true, login: true, cityIds: true, status: true,
+        note: true, sipAddress: true, createdAt: true, updatedAt: true,
       },
     },
     [UserRole.DIRECTOR]: {
       model: 'director' as const,
       select: {
-        id: true, name: true, login: true, cities: true, dateCreate: true,
+        id: true, name: true, login: true, cityIds: true,
         note: true, tgId: true, createdAt: true, updatedAt: true,
       },
     },
     [UserRole.MASTER]: {
       model: 'master' as const,
       select: {
-        id: true, name: true, login: true, cities: true, statusWork: true,
-        dateCreate: true, note: true, tgId: true, chatId: true,
-        createdAt: true, updatedAt: true,
+        id: true, name: true, login: true, cityIds: true, status: true,
+        note: true, chatId: true, createdAt: true, updatedAt: true,
       },
     },
   };
