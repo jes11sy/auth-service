@@ -50,23 +50,23 @@ export class AuditController {
     }
 
     if (query.startDate || query.endDate) {
-      where.timestamp = {};
+      where.createdAt = {};
       if (query.startDate) {
-        where.timestamp.gte = new Date(query.startDate);
+        where.createdAt.gte = new Date(query.startDate);
       }
       if (query.endDate) {
-        where.timestamp.lte = new Date(query.endDate);
+        where.createdAt.lte = new Date(query.endDate);
       }
     }
 
     // Получаем общее количество
-    const total = await this.prisma.auditLog.count({ where });
+    const total = await this.prisma.auditAuth.count({ where });
 
     // Получаем логи
-    const logs = await this.prisma.auditLog.findMany({
+    const logs = await this.prisma.auditAuth.findMany({
       where,
       orderBy: {
-        timestamp: 'desc',
+        createdAt: 'desc',
       },
       skip,
       take: limit,
@@ -83,7 +83,7 @@ export class AuditController {
 
         return {
           id: log.id,
-          timestamp: log.timestamp.toISOString(),
+          timestamp: log.createdAt.toISOString(),
           eventType: log.eventType,
           userId: log.userId,
           role: log.role,
