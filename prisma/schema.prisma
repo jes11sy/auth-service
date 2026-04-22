@@ -42,7 +42,6 @@ model Operator {
   login      String    @unique @db.VarChar(255)    /// Логин для входа
   password   String    @db.VarChar(255)            /// Хеш пароля (bcrypt)
   status     String    @db.VarChar(50)             /// Статус (active/inactive)
-  cityIds    Int[]     @default([]) @map("city_ids") /// ID городов из references_service
   passport   String?   @db.VarChar(500)            /// Ссылка на скан паспорта
   contract   String?   @db.VarChar(500)            /// Ссылка на скан договора
   note       String?   @db.Text                   /// Заметка
@@ -65,7 +64,6 @@ model Director {
   login     String    @unique @db.VarChar(255)     /// Логин для входа
   password  String    @db.VarChar(255)             /// Хеш пароля (bcrypt)
   status    String    @db.VarChar(50)              /// Статус (active/inactive)
-  cityIds   Int[]     @default([]) @map("city_ids") /// ID городов из references_service
   passport  String?   @db.VarChar(500)             /// Ссылка на скан паспорта
   contract  String?   @db.VarChar(500)             /// Ссылка на скан договора
   note      String?   @db.Text                    /// Заметка
@@ -88,7 +86,6 @@ model Master {
   login     String?   @unique @db.VarChar(255)     /// Логин (опционально)
   password  String?   @db.VarChar(255)             /// Хеш пароля (опционально)
   status    String    @db.VarChar(50)              /// Статус (active/inactive)
-  cityIds   Int[]     @default([]) @map("city_ids") /// ID городов из references_service
   passport  String?   @db.VarChar(500)             /// Ссылка на скан паспорта
   contract  String?   @db.VarChar(500)             /// Ссылка на скан договора
   note      String?   @db.Text                    /// Заметка
@@ -106,6 +103,20 @@ model Master {
   @@map("masters")
 }
 
+/// Связь пользователей с городами (many-to-many; города хранятся здесь, не в city_ids на operators/directors/masters)
+model UserCity {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  userType  String   @map("user_type") @db.VarChar(20)
+  cityId    Int      @map("city_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, userType, cityId])
+  @@index([userId, userType])
+  @@index([cityId])
+  @@schema("auth_service")
+  @@map("user_cities")
+}
 
 /// Расписание мастеров
 model MasterSchedule {

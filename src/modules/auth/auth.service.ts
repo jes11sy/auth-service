@@ -70,6 +70,19 @@ export class AuthService implements OnModuleInit {
     return crypto.randomBytes(16).toString('hex');
   }
 
+  /** Города для JWT/профиля: в БД в auth_service.user_cities (см. users-service syncUserCityIds), не в колонке city_ids. */
+  private async getCityIdsFromUserCities(
+    userId: number,
+    userType: 'operator' | 'director' | 'master',
+  ): Promise<number[]> {
+    const rows = await this.prisma.userCity.findMany({
+      where: { userId, userType },
+      select: { cityId: true },
+      orderBy: { cityId: 'asc' },
+    });
+    return rows.map((r) => r.cityId);
+  }
+
   /**
    * ✅ FIX #4: Проверка блокировки в in-memory fallback при недоступности Redis
    */
@@ -155,7 +168,6 @@ export class AuthService implements OnModuleInit {
               name: true,
               login: true,
               password: true,
-              cityIds: true,
               status: true,
               sipAddress: true,
             },
@@ -170,7 +182,6 @@ export class AuthService implements OnModuleInit {
               name: true,
               login: true,
               password: true,
-              cityIds: true,
               tgId: true,
             },
           });
@@ -184,7 +195,6 @@ export class AuthService implements OnModuleInit {
               name: true,
               login: true,
               password: true,
-              cityIds: true,
               status: true,
               chatId: true,
             },
@@ -225,11 +235,18 @@ export class AuthService implements OnModuleInit {
         ...userData,
         role: role as UserRole,
       };
+      if (role === UserRole.OPERATOR) {
+        authUser.cityIds = await this.getCityIdsFromUserCities(userData.id, 'operator');
+      } else if (role === UserRole.DIRECTOR) {
+        authUser.cityIds = await this.getCityIdsFromUserCities(userData.id, 'director');
+      } else if (role === UserRole.MASTER) {
+        authUser.cityIds = await this.getCityIdsFromUserCities(userData.id, 'master');
+      }
       return authUser;
     } catch (error) {
-      // ✅ ИСПРАВЛЕНИЕ: Логируем только общую информацию без деталей
-      this.logger.error(`Validation error for role: ${role}`);
-      return null; // Не пробрасываем исключение наверх
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`validateUser failed for role ${role}: ${msg}`);
+      return null;
     }
   }
 
@@ -612,21 +629,21 @@ export class AuthService implements OnModuleInit {
     [UserRole.OPERATOR]: {
       model: 'operator' as const,
       select: {
-        id: true, name: true, login: true, cityIds: true, status: true,
+        id: true, name: true, login: true, status: true,
         note: true, sipAddress: true, createdAt: true, updatedAt: true,
       },
     },
     [UserRole.DIRECTOR]: {
       model: 'director' as const,
       select: {
-        id: true, name: true, login: true, cityIds: true,
+        id: true, name: true, login: true,
         note: true, tgId: true, createdAt: true, updatedAt: true,
       },
     },
     [UserRole.MASTER]: {
       model: 'master' as const,
       select: {
-        id: true, name: true, login: true, cityIds: true, status: true,
+        id: true, name: true, login: true, status: true,
         note: true, chatId: true, createdAt: true, updatedAt: true,
       },
     },
@@ -746,6 +763,13 @@ export class AuthService implements OnModuleInit {
       }
 
       const result: UserProfile = { ...profile, role };
+      if (role === UserRole.OPERATOR) {
+        result.cityIds = await this.getCityIdsFromUserCities(id, 'operator');
+      } else if (role === UserRole.DIRECTOR) {
+        result.cityIds = await this.getCityIdsFromUserCities(id, 'director');
+      } else if (role === UserRole.MASTER) {
+        result.cityIds = await this.getCityIdsFromUserCities(id, 'master');
+      }
 
       // Сохраняем в кеш (с graceful degradation)
       await this.redis.safeExecute(
